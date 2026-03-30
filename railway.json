@@ -1,0 +1,117 @@
+# 零安装云端部署方案
+
+> 🎯 **本地完全不需要安装Python**，所有操作都在云平台和浏览器中完成
+
+## 方案选择
+
+推荐使用以下任一免费云平台：
+
+| 平台 | 优点 | 免费额度 |
+|------|------|----------|
+| **Railway** | 最简单，自动检测Python | 每月500小时 |
+| **Render** | 稳定，国内访问友好 | 免费套餐永久 |
+| **Fly.io** | 性能好，全球节点 | 免费3个实例 |
+
+本教程以 **Railway** 为例（最简单）
+
+---
+
+## 🚀 Railway 云平台部署（推荐）
+
+### 第一步：准备代码仓库
+
+#### 选项A：使用 GitHub（推荐）
+
+**1. 注册 GitHub 账号**
+
+访问：https://github.com/signup
+
+填写邮箱、密码，完成注册
+
+**2. 创建代码仓库**
+
+1. 登录 GitHub
+2. 点击右上角 `+` → `New repository`
+3. 填写信息：
+   - Repository name: `feishu-todo-bot`
+   - 设为 `Public` 或 `Private`（都可以）
+   - 点击 `Create repository`
+
+**3. 上传代码**
+
+方式1：使用 GitHub 网页上传
+
+1. 在仓库页面点击 `Add file` → `Upload files`
+2. 将 `C:\Users\liuli8\feishu-todo-bot` 文件夹中的所有文件拖拽上传
+3. 点击 `Commit changes`
+
+方式2：使用 GitHub Desktop（更简单）
+
+1. 下载 GitHub Desktop: https://desktop.github.com/
+2. 安装并登录
+3. `File` → `Add Local Repository`
+4. 选择 `C:\Users\liuli8\feishu-todo-bot`
+5. 点击 `Publish repository`
+
+#### 选项B：不用 GitHub，直接上传到 Railway
+
+Railway 支持直接从本地部署，但需要安装 Railway CLI（需要 npm）。
+
+**推荐使用选项A**，更简单直观。
+
+### 第二步：部署到 Railway
+
+**1. 注册 Railway 账号**
+
+访问：https://railway.app/
+
+点击 `Sign in with GitHub` 使用 GitHub 账号登录
+
+**2. 创建新项目**
+
+1. 点击 `New Project`
+2. 选择 `Deploy from GitHub repo`
+3. 选择 `feishu-todo-bot` 仓库
+4. 点击 `Deploy Now`
+
+Railway 会自动：
+- ✅ 检测到 Python 项目
+- ✅ 读取 `requirements.txt`
+- ✅ 安装所有依赖
+- ✅ 启动应用
+
+**3. 配置环境变量**
+
+1. 在项目页面，点击项目卡片
+2. 切换到 `Variables` 标签
+3. 点击 `+ New Variable`，逐个添加：
+
+```
+FEISHU_APP_ID = cli_你的应用ID
+FEISHU_APP_SECRET = 你的应用密钥
+FEISHU_VERIFICATION_TOKEN = 你的验证令牌
+FEISHU_ENCRYPT_KEY =
+FLASK_HOST = 0.0.0.0
+FLASK_PORT = 8000
+FLASK_DEBUG = False
+DATABASE_PATH = /app/data/todos.db
+LOG_LEVEL = INFO
+LOG_FILE = /app/logs/bot.log
+```
+
+**4. 添加启动命令配置**
+
+回到项目根目录，我需要添加一个 Railway 配置文件：
+
+<function_calls>
+<invoke name="Write">
+<parameter name="content">{
+  "build": {
+    "builder": "NIXPACKS"
+  },
+  "deploy": {
+    "startCommand": "python app.py",
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 10
+  }
+}
