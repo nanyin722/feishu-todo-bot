@@ -1,9 +1,11 @@
 """
 消息处理逻辑
 """
+import re
+import json
 import logging
-from typing import Dict, Any, Optional
-from datetime import datetime
+from typing import Dict, Any, Optional, List
+from datetime import datetime, date
 
 from .todo_parser import TodoParser, CommandParser, ReminderConfigParser
 from .feishu_client import FeishuClient
@@ -49,7 +51,6 @@ class MessageHandler:
                 return True
 
             # 解析消息内容（JSON格式）
-            import json
             try:
                 content_obj = json.loads(content)
                 text = content_obj.get('text', '')
@@ -63,15 +64,35 @@ class MessageHandler:
 
             logger.info(f"Processing message from {user_name} in chat {chat_id}: {text}")
 
-            # 检查是否为待办消息
-            if self.todo_parser.is_todo_message(text):
-                return self.handle_todo_message(chat_id, user_id, user_name, text)
-
-            # 检查是否为命令消息（@机器人）
+            # 提取所有 @提及
             mentions = message.get('mentions', [])
+
             if mentions:
-                # 如果@了机器人，处理为命令
-                return self.handle_command(chat_id, user_id, user_name, text, mentions)
+                # 清理 @名字 和 @_user_N 占位符，得到纯指令文本
+                clean = text
+                for m in mentions:
+                    clean = clean.replace(f"@{m.get('name', '')}", "").strip()
+                clean = re.sub(r'@_user_\d+', '', clean).strip()
+
+                # 判断是否为指令：匹配已知命令关键词（命令完成/删除必须带 ID）
+                COMMAND_PATTERNS = [
+                    r'查看待办', r'待办列表', r'^查看$', r'^列表$',
+                    r'完成\s*\d+', r'删除\s*\d+',
+                    r'设置提醒', r'帮助', r'help', r'使用说明',
+                    r'生成表格', r'导出表格', r'^表格$',
+                ]
+                is_command = (not clean) or any(re.search(p, clean) for p in COMMAND_PATTERNS)
+
+                if is_command:
+                    # @机器人 + 命令 → 命令处理
+                    return self.handle_command(chat_id, user_id, user_name, text, mentions, [])
+                else:
+                    # @了某人 + 非命令内容 → 待办，@的人作为负责人
+                    return self.handle_todo_message(chat_id, user_id, user_name, text, mentions)
+
+            # 无@：自然语言关键词检测
+            if self.todo_parser.is_todo_message(text, has_non_bot_mentions=False):
+                return self.handle_todo_message(chat_id, user_id, user_name, text, [])
 
             return True
 
@@ -80,15 +101,17 @@ class MessageHandler:
             return False
 
     def handle_todo_message(self, chat_id: str, user_id: str,
-                           user_name: str, text: str) -> bool:
+                            user_name: str, text: str,
+                            non_bot_mentions: list = None) -> bool:
         """
-        处理待办消息
+        处理待办消息（支持自然语言）
 
         Args:
             chat_id: 群组ID
             user_id: 用户ID
             user_name: 用户名
             text: 消息文本
+            non_bot_mentions: @的非机器人用户列表
 
         Returns:
             是否处理成功
@@ -102,20 +125,39 @@ class MessageHandler:
 
             content, deadline = result
 
+            # 提取负责人（消息中@的非机器人用户）
+            assignee_id = None
+            assignee_name = None
+            if non_bot_mentions:
+                first = non_bot_mentions[0]
+                assignee_id = first.get('id', {}).get('open_id', '') or first.get('open_id', '')
+                assignee_name = first.get('name', '')
+
             # 创建待办对象
             todo = Todo(
                 chat_id=chat_id,
                 user_id=user_id,
                 user_name=user_name,
                 content=content,
-                deadline=deadline
+                deadline=deadline,
+                assignee_id=assignee_id,
+                assignee_name=assignee_name
             )
 
             # 保存到数据库
             todo_id = self.database.add_todo(todo)
 
-            # 发送确认消息
-            reply = f"✅ 待办已添加\n\n任务ID: {todo_id}\n内容: {content}\n截止日期: {deadline}\n创建者: {user_name}"
+            # 构建确认消息
+            deadline_str = f"\n截止日期: {deadline}" if deadline else "\n截止日期: 未设置"
+            assignee_str = f"\n负责人: {assignee_name}" if assignee_name else ""
+            reply = (
+                f"✅ 待办已添加\n\n"
+                f"任务ID: {todo_id}\n"
+                f"内容: {content}"
+                f"{deadline_str}"
+                f"\n创建者: {user_name}"
+                f"{assignee_str}"
+            )
             self.feishu_client.send_text_message(chat_id, reply)
 
             return True
@@ -125,7 +167,7 @@ class MessageHandler:
             return False
 
     def handle_command(self, chat_id: str, user_id: str, user_name: str,
-                      text: str, mentions: list) -> bool:
+                       text: str, mentions: list, non_bot_mentions: list = None) -> bool:
         """
         处理命令消息
 
@@ -134,7 +176,8 @@ class MessageHandler:
             user_id: 用户ID
             user_name: 用户名
             text: 消息文本
-            mentions: @提及列表
+            mentions: @提及列表（含机器人）
+            non_bot_mentions: @的非机器人用户列表
 
         Returns:
             是否处理成功
@@ -164,6 +207,10 @@ class MessageHandler:
             if '设置提醒' in clean_text:
                 return self.handle_set_reminder_command(chat_id, clean_text)
 
+            # 生成表格
+            if self.command_parser.is_command(clean_text, ['生成表格', '导出表格', '表格']):
+                return self.handle_table_command(chat_id)
+
             # 帮助
             if self.command_parser.is_command(clean_text, ['帮助', 'help', '使用说明']):
                 return self.handle_help_command(chat_id)
@@ -187,22 +234,24 @@ class MessageHandler:
                 self.feishu_client.send_text_message(chat_id, reply)
                 return True
 
-            # 按日期分组
-            from datetime import datetime, date
             today = date.today()
 
-            urgent = []  # 今天到期
-            this_week = []  # 本周到期
-            later = []  # 后续
+            overdue = []    # 已逾期
+            urgent = []     # 今日到期
+            this_week = []  # 本周到期（1-7天）
+            later = []      # 后续
 
             for todo in todos:
+                if not todo.deadline:
+                    later.append(todo)
+                    continue
                 deadline_date = datetime.strptime(todo.deadline, '%Y-%m-%d').date()
                 days_diff = (deadline_date - today).days
 
                 if days_diff < 0:
-                    urgent.append(todo)  # 已逾期
+                    overdue.append(todo)
                 elif days_diff == 0:
-                    urgent.append(todo)  # 今天到期
+                    urgent.append(todo)
                 elif days_diff <= 7:
                     this_week.append(todo)
                 else:
@@ -211,22 +260,34 @@ class MessageHandler:
             # 构建消息
             lines = [f"📋 待办事项列表（共{len(todos)}项）\n"]
 
+            def _fmt(todo: Todo) -> str:
+                assignee = f" 👤{todo.assignee_name}" if todo.assignee_name else ""
+                deadline = f" - 截止：{todo.deadline}" if todo.deadline else ""
+                return f"• [{todo.id}] 【{todo.user_name}】{todo.content}{assignee}{deadline}"
+
+            if overdue:
+                lines.append("🔴 已逾期：")
+                for todo in overdue:
+                    days_ago = (today - datetime.strptime(todo.deadline, '%Y-%m-%d').date()).days
+                    lines.append(f"{_fmt(todo)} (逾期{days_ago}天)")
+                lines.append("")
+
             if urgent:
-                lines.append("🔴 紧急/逾期：")
+                lines.append("🟠 今日到期：")
                 for todo in urgent:
-                    lines.append(f"• [{todo.id}] 【{todo.user_name}】{todo.content} - 截止：{todo.deadline}")
+                    lines.append(_fmt(todo))
                 lines.append("")
 
             if this_week:
                 lines.append("🟡 本周到期：")
                 for todo in this_week:
-                    lines.append(f"• [{todo.id}] 【{todo.user_name}】{todo.content} - 截止：{todo.deadline}")
+                    lines.append(_fmt(todo))
                 lines.append("")
 
             if later:
                 lines.append("⚪ 后续待办：")
                 for todo in later:
-                    lines.append(f"• [{todo.id}] 【{todo.user_name}】{todo.content} - 截止：{todo.deadline}")
+                    lines.append(_fmt(todo))
 
             reply = "\n".join(lines)
             self.feishu_client.send_text_message(chat_id, reply)
@@ -240,7 +301,6 @@ class MessageHandler:
         """处理完成待办命令"""
         try:
             # 提取任务ID
-            import re
             match = re.search(r'完成\s+(\d+)', text)
             if not match:
                 reply = "❌ 请指定任务ID，格式：@机器人 完成 <任务ID>"
@@ -280,7 +340,6 @@ class MessageHandler:
         """处理删除待办命令"""
         try:
             # 提取任务ID
-            import re
             match = re.search(r'删除\s+(\d+)', text)
             if not match:
                 reply = "❌ 请指定任务ID，格式：@机器人 删除 <任务ID>"
@@ -304,7 +363,7 @@ class MessageHandler:
 
             # 检查权限（只有创建者可以删除）
             if todo.user_id != user_id:
-                reply = f"❌ 只有创建者可以删除任务"
+                reply = "❌ 只有创建者可以删除任务"
                 self.feishu_client.send_text_message(chat_id, reply)
                 return True
 
@@ -355,14 +414,42 @@ class MessageHandler:
             logger.error(f"Error handling set reminder command: {e}", exc_info=True)
             return False
 
+    def handle_table_command(self, chat_id: str) -> bool:
+        """处理生成表格命令"""
+        try:
+            todos = self.database.get_todos_by_chat(chat_id, include_completed=False)
+
+            # 调用飞书客户端创建表格
+            result = self.feishu_client.create_todo_spreadsheet(chat_id, todos)
+
+            if result:
+                sheet_url, sheet_token = result
+                reply = (
+                    f"📊 待办表格已生成，可手动修改\n\n"
+                    f"🔗 {sheet_url}\n\n"
+                    f"字段：内容 / 负责人 / 创建时间 / 截止时间 / 状态 / 备注"
+                )
+            else:
+                reply = "❌ 生成表格失败，请检查机器人是否有云文档权限"
+
+            self.feishu_client.send_text_message(chat_id, reply)
+            return True
+
+        except Exception as e:
+            logger.error(f"Error handling table command: {e}", exc_info=True)
+            return False
+
     def handle_help_command(self, chat_id: str) -> bool:
         """处理帮助命令"""
         try:
             help_text = """📖 待办机器人使用说明
 
-📝 添加待办：
-待办：任务描述 @YYYY-MM-DD
-示例：待办：完成季度报告 @2026-03-25
+📝 添加待办（自然语言，无需固定格式）：
+直接在群内发送包含任务意图的消息即可，例如：
+  • 麻烦 @张三 下周五前完成用户调研报告
+  • 需要跟进一下客户反馈，3月25日前
+
+@的人自动成为负责人，提到的时间自动为截止日期
 
 🔍 查看待办：
 @机器人 查看待办
@@ -373,15 +460,18 @@ class MessageHandler:
 ❌ 删除待办：
 @机器人 删除 <任务ID>（仅创建者可删除）
 
-⏰ 设置提醒：
+⏰ 设置提醒时间：
 @机器人 设置提醒 周<X> HH:MM
-示例：@机器人 设置提醒 周1 09:00
+示例：@机器人 设置提醒 周一 09:00
+
+📊 生成飞书表格：
+@机器人 生成表格
 
 ❓ 查看帮助：
 @机器人 帮助
 
 ---
-机器人会在每周固定时间和任务截止当天自动提醒 @所有人"""
+机器人会在每周固定时间和任务截止当天自动 @负责人 提醒"""
 
             self.feishu_client.send_text_message(chat_id, help_text)
             return True

@@ -20,17 +20,31 @@ class ReminderService:
         self.database = database
 
     def send_weekly_reminder(self):
-        """发送每周统一提醒"""
+        """
+        发送每周统一提醒。
+        每小时触发一次，根据各群组配置的 weekly_day/weekly_hour/weekly_minute
+        判断当前是否匹配，匹配则发送（每次触发时检查当前小时内是否应发送）。
+        """
         try:
-            logger.info("Starting weekly reminder task")
+            logger.info("Starting weekly reminder check")
 
-            # 获取所有有待办的群组
+            now = datetime.now()
+            current_weekday = now.isoweekday()  # 1=周一 ... 7=周日
+            current_hour = now.hour
+            current_minute = now.minute
+
             chat_ids = self.database.get_all_active_chats()
 
+            sent_count = 0
             for chat_id in chat_ids:
-                self._send_weekly_reminder_for_chat(chat_id)
+                config = self.database.get_reminder_config(chat_id)
+                # 判断当前时间是否匹配该群配置（分钟误差在0-59分钟内均视为本小时应发送）
+                if (config.weekly_day == current_weekday
+                        and config.weekly_hour == current_hour):
+                    self._send_weekly_reminder_for_chat(chat_id)
+                    sent_count += 1
 
-            logger.info(f"Weekly reminder completed for {len(chat_ids)} chats")
+            logger.info(f"Weekly reminder check completed, sent to {sent_count} chats")
 
         except Exception as e:
             logger.error(f"Error in weekly reminder task: {e}", exc_info=True)
@@ -47,56 +61,86 @@ class ReminderService:
 
             # 按日期分类
             today = date.today()
-            urgent = []  # 今天到期或已逾期
+            overdue = []    # 已逾期
+            urgent = []     # 今日到期
             this_week = []  # 本周到期
-            later = []  # 后续
+            later = []      # 后续
 
             for todo in todos:
+                if not todo.deadline:
+                    later.append(todo)
+                    continue
                 deadline_date = datetime.strptime(todo.deadline, '%Y-%m-%d').date()
                 days_diff = (deadline_date - today).days
 
-                if days_diff <= 0:
+                if days_diff < 0:
+                    overdue.append(todo)
+                elif days_diff == 0:
                     urgent.append(todo)
                 elif days_diff <= 7:
                     this_week.append(todo)
                 else:
                     later.append(todo)
 
+            # 收集所有需要@的负责人
+            at_ids = list({
+                todo.assignee_id for todo in todos
+                if todo.assignee_id
+            })
+
             # 构建提醒消息
             message = self._build_weekly_reminder_message(
-                len(todos), urgent, this_week, later
+                len(todos), overdue, urgent, this_week, later
             )
 
-            # 发送消息（@所有人）
-            self.feishu_client.send_text_message(chat_id, message, at_all=True)
+            # 发送消息：有负责人则@负责人，否则@所有人
+            if at_ids:
+                self.feishu_client.send_text_message_with_at_users(chat_id, message, at_ids)
+            else:
+                self.feishu_client.send_text_message(chat_id, message, at_all=True)
+
             logger.info(f"Sent weekly reminder to chat {chat_id}")
 
         except Exception as e:
             logger.error(f"Error sending weekly reminder to chat {chat_id}: {e}", exc_info=True)
 
     def _build_weekly_reminder_message(self, total: int,
-                                      urgent: List[Todo],
-                                      this_week: List[Todo],
-                                      later: List[Todo]) -> str:
+                                       overdue: List[Todo],
+                                       urgent: List[Todo],
+                                       this_week: List[Todo],
+                                       later: List[Todo]) -> str:
         """构建每周提醒消息"""
         lines = [f"📋 本周待办提醒\n", f"本周有 {total} 个待办事项：\n"]
 
+        def _fmt(todo: Todo) -> str:
+            assignee = f" 👤{todo.assignee_name}" if todo.assignee_name else ""
+            deadline = f" - 截止：{todo.deadline}" if todo.deadline else ""
+            return f"• [{todo.id}] 【{todo.user_name}】{todo.content}{assignee}{deadline}"
+
+        if overdue:
+            lines.append("🔴 已逾期：")
+            for todo in overdue:
+                today = date.today()
+                days_ago = (today - datetime.strptime(todo.deadline, '%Y-%m-%d').date()).days
+                lines.append(f"{_fmt(todo)} (逾期{days_ago}天)")
+            lines.append("")
+
         if urgent:
-            lines.append("🔴 紧急（今天到期或已逾期）：")
+            lines.append("🟠 今日到期：")
             for todo in urgent:
-                lines.append(f"• [{todo.id}] 【{todo.user_name}】{todo.content} - 截止：{todo.deadline}")
+                lines.append(_fmt(todo))
             lines.append("")
 
         if this_week:
             lines.append("🟡 本周到期：")
             for todo in this_week:
-                lines.append(f"• [{todo.id}] 【{todo.user_name}】{todo.content} - 截止：{todo.deadline}")
+                lines.append(_fmt(todo))
             lines.append("")
 
         if later:
             lines.append("⚪ 后续待办：")
             for todo in later:
-                lines.append(f"• [{todo.id}] 【{todo.user_name}】{todo.content} - 截止：{todo.deadline}")
+                lines.append(_fmt(todo))
             lines.append("")
 
         lines.append("请大家按时完成！回复 @机器人 完成 <任务ID> 可标记完成")
@@ -134,23 +178,32 @@ class ReminderService:
             logger.error(f"Error in daily deadline reminder task: {e}", exc_info=True)
 
     def _send_deadline_reminder_for_chat(self, chat_id: str, todos: List[Todo]):
-        """为单个群组发送截止日提醒"""
+        """为单个群组发送截止日提醒，@对应负责人"""
         try:
-            # 构建提醒消息
             lines = [
                 "⏰ 待办截止提醒\n",
                 "以下待办今天到期：\n"
             ]
 
             for todo in todos:
-                lines.append(f"• [{todo.id}] 【{todo.user_name}】{todo.content}")
+                assignee = f" 👤{todo.assignee_name}" if todo.assignee_name else ""
+                lines.append(f"• [{todo.id}] 【{todo.user_name}】{todo.content}{assignee}")
 
             lines.append("\n请尽快完成！回复 @机器人 完成 <任务ID> 可标记完成")
 
             message = "\n".join(lines)
 
-            # 发送消息（@所有人）
-            self.feishu_client.send_text_message(chat_id, message, at_all=True)
+            # 收集该群到期任务的负责人
+            at_ids = list({
+                todo.assignee_id for todo in todos
+                if todo.assignee_id
+            })
+
+            # @负责人，无负责人则@所有人
+            if at_ids:
+                self.feishu_client.send_text_message_with_at_users(chat_id, message, at_ids)
+            else:
+                self.feishu_client.send_text_message(chat_id, message, at_all=True)
 
             # 标记为已提醒
             for todo in todos:
@@ -162,14 +215,43 @@ class ReminderService:
             logger.error(f"Error sending deadline reminder to chat {chat_id}: {e}", exc_info=True)
 
     def check_overdue_todos(self):
-        """检查逾期待办（可选功能）"""
+        """检查并推送逾期待办提醒"""
         try:
             logger.info("Checking for overdue todos")
 
-            # 这里可以添加逾期待办的特殊处理逻辑
-            # 例如：每天检查一次，发送逾期提醒等
+            today = date.today()
+            chat_ids = self.database.get_all_active_chats()
 
-            # 当前版本暂不实现，预留接口
+            for chat_id in chat_ids:
+                todos = self.database.get_todos_by_chat(chat_id, include_completed=False)
+                overdue = [
+                    t for t in todos
+                    if t.deadline and
+                    datetime.strptime(t.deadline, '%Y-%m-%d').date() < today
+                ]
+
+                if not overdue:
+                    continue
+
+                lines = ["⚠️ 逾期待办提醒\n以下任务已超过截止日期：\n"]
+                for todo in overdue:
+                    days_ago = (today - datetime.strptime(todo.deadline, '%Y-%m-%d').date()).days
+                    assignee = f" 👤{todo.assignee_name}" if todo.assignee_name else ""
+                    lines.append(
+                        f"• [{todo.id}] 【{todo.user_name}】{todo.content}{assignee}"
+                        f" - 截止：{todo.deadline}（逾期{days_ago}天）"
+                    )
+
+                lines.append("\n请尽快处理！回复 @机器人 完成 <任务ID> 可标记完成")
+                message = "\n".join(lines)
+
+                at_ids = list({t.assignee_id for t in overdue if t.assignee_id})
+                if at_ids:
+                    self.feishu_client.send_text_message_with_at_users(chat_id, message, at_ids)
+                else:
+                    self.feishu_client.send_text_message(chat_id, message, at_all=True)
+
+                logger.info(f"Sent overdue reminder to chat {chat_id} for {len(overdue)} todos")
 
         except Exception as e:
             logger.error(f"Error checking overdue todos: {e}", exc_info=True)

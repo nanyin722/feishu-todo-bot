@@ -21,16 +21,15 @@ class SchedulerManager:
     def start(self):
         """启动调度器"""
         try:
-            # 添加每周提醒任务（每周一早上9点）
-            # 注意：实际使用时应该根据各群组的配置动态调整
+            # 每周提醒：每小时触发一次，send_weekly_reminder 内部按各群配置判断是否发送
             self.scheduler.add_job(
                 func=self.reminder_service.send_weekly_reminder,
-                trigger=CronTrigger(day_of_week='mon', hour=9, minute=0),
+                trigger=IntervalTrigger(hours=1),
                 id='weekly_reminder',
-                name='每周待办提醒',
+                name='每周待办提醒（按各群配置时间）',
                 replace_existing=True
             )
-            logger.info("Added weekly reminder job: Every Monday at 09:00")
+            logger.info("Added weekly reminder job: Hourly check with per-chat config")
 
             # 添加每日截止日提醒任务（每天早上9点）
             self.scheduler.add_job(

@@ -55,6 +55,16 @@ class Database:
                 )
             """)
 
+            # 迁移：新增负责人字段（兼容旧数据库）
+            try:
+                cursor.execute("ALTER TABLE todos ADD COLUMN assignee_id TEXT")
+            except Exception:
+                pass
+            try:
+                cursor.execute("ALTER TABLE todos ADD COLUMN assignee_name TEXT")
+            except Exception:
+                pass
+
             # 创建索引
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_chat_deadline
@@ -89,9 +99,10 @@ class Database:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO todos (chat_id, user_id, user_name, content, deadline)
-                VALUES (?, ?, ?, ?, ?)
-            """, (todo.chat_id, todo.user_id, todo.user_name, todo.content, todo.deadline))
+                INSERT INTO todos (chat_id, user_id, user_name, content, deadline, assignee_id, assignee_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (todo.chat_id, todo.user_id, todo.user_name, todo.content, todo.deadline,
+                  todo.assignee_id, todo.assignee_name))
 
             todo_id = cursor.lastrowid
             logger.info(f"Added todo {todo_id}: {todo.content}")

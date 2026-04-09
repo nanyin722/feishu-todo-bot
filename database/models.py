@@ -14,11 +14,13 @@ class Todo:
     user_id: str = ""
     user_name: str = ""
     content: str = ""
-    deadline: str = ""  # YYYY-MM-DD格式
+    deadline: str = ""  # YYYY-MM-DD格式，为空表示未设截止日期
     created_at: Optional[str] = None
     reminded_daily: bool = False
     completed: bool = False
     completed_at: Optional[str] = None
+    assignee_id: Optional[str] = None    # 负责人 open_id
+    assignee_name: Optional[str] = None  # 负责人显示名
 
     def to_dict(self):
         """转换为字典"""
@@ -32,7 +34,9 @@ class Todo:
             'created_at': self.created_at,
             'reminded_daily': self.reminded_daily,
             'completed': self.completed,
-            'completed_at': self.completed_at
+            'completed_at': self.completed_at,
+            'assignee_id': self.assignee_id,
+            'assignee_name': self.assignee_name
         }
 
     @staticmethod
@@ -48,7 +52,9 @@ class Todo:
             created_at=data.get('created_at'),
             reminded_daily=bool(data.get('reminded_daily', 0)),
             completed=bool(data.get('completed', 0)),
-            completed_at=data.get('completed_at')
+            completed_at=data.get('completed_at'),
+            assignee_id=data.get('assignee_id'),
+            assignee_name=data.get('assignee_name')
         )
 
 

@@ -1,8 +1,9 @@
 """
 飞书API客户端封装
 """
+import json
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import *
@@ -73,14 +74,34 @@ class FeishuClient:
         Returns:
             是否发送成功
         """
-        import json
-
         content = {"text": text}
 
         # 如果需要@所有人
         if at_all:
             content["text"] = f"<at user_id=\"all\">所有人</at> {text}"
 
+        return self.send_message(chat_id, "text", json.dumps(content))
+
+    def send_text_message_with_at_users(self, chat_id: str, text: str,
+                                        at_open_ids: List[str]) -> bool:
+        """
+        发送文本消息并@指定用户
+
+        Args:
+            chat_id: 群组ID
+            text: 文本内容
+            at_open_ids: 需要@的用户 open_id 列表
+
+        Returns:
+            是否发送成功
+        """
+        if not at_open_ids:
+            return self.send_text_message(chat_id, text)
+
+        at_tags = " ".join(
+            f"<at user_id=\"{oid}\"></at>" for oid in at_open_ids
+        )
+        content = {"text": f"{at_tags} {text}"}
         return self.send_message(chat_id, "text", json.dumps(content))
 
     def send_rich_text_message(self, chat_id: str, title: str,
@@ -97,8 +118,6 @@ class FeishuClient:
         Returns:
             是否发送成功
         """
-        import json
-
         # 如果需要@所有人，在标题前添加
         if at_all:
             at_element = [{
@@ -168,4 +187,109 @@ class FeishuClient:
 
         except Exception as e:
             logger.error(f"Error getting user info: {e}")
+            return None
+
+    def create_todo_spreadsheet(self, chat_id: str, todos: list) -> Optional[Tuple[str, str]]:
+        """
+        创建飞书电子表格并写入待办数据
+
+        Args:
+            chat_id: 群组ID（用于表格标题）
+            todos: Todo 对象列表
+
+        Returns:
+            (spreadsheet_url, spreadsheet_token)，失败返回 None
+        """
+        try:
+            import requests
+            from datetime import datetime as dt
+
+            # 获取访问令牌
+            token = self._get_tenant_access_token()
+            if not token:
+                logger.error("Failed to get tenant access token")
+                return None
+
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json; charset=utf-8"
+            }
+
+            # 1. 创建电子表格
+            title = f"待办列表 {dt.now().strftime('%Y-%m-%d %H:%M')}"
+            create_resp = requests.post(
+                "https://open.feishu.cn/open-apis/sheets/v3/spreadsheets",
+                headers=headers,
+                json={"title": title}
+            )
+            create_data = create_resp.json()
+
+            if create_data.get("code") != 0:
+                logger.error(f"Failed to create spreadsheet: {create_data}")
+                return None
+
+            spreadsheet_token = create_data["data"]["spreadsheet"]["spreadsheet_token"]
+            spreadsheet_url = create_data["data"]["spreadsheet"]["url"]
+            sheet_id = create_data["data"]["spreadsheet"]["sheets"][0]["sheet_id"] \
+                if create_data["data"]["spreadsheet"].get("sheets") else "Sheet1"
+
+            logger.info(f"Created spreadsheet: {spreadsheet_token}")
+
+            # 2. 写入表头 + 数据
+            header = [["内容", "负责人", "创建时间", "截止时间", "状态", "备注"]]
+            rows = []
+            for todo in todos:
+                status = "已完成" if todo.completed else "进行中"
+                rows.append([
+                    todo.content or "",
+                    todo.assignee_name or todo.user_name or "",
+                    todo.created_at or "",
+                    todo.deadline or "未设置",
+                    status,
+                    ""  # 备注留空供手动填写
+                ])
+
+            all_rows = header + rows
+            end_row = len(all_rows)
+            range_str = f"{sheet_id}!A1:F{end_row}"
+
+            write_resp = requests.put(
+                f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values",
+                headers=headers,
+                json={
+                    "valueRange": {
+                        "range": range_str,
+                        "values": all_rows
+                    }
+                }
+            )
+            write_data = write_resp.json()
+
+            if write_data.get("code") != 0:
+                logger.error(f"Failed to write spreadsheet data: {write_data}")
+                # 表格已创建，仍返回 URL
+                return (spreadsheet_url, spreadsheet_token)
+
+            logger.info(f"Spreadsheet data written: {len(rows)} rows")
+            return (spreadsheet_url, spreadsheet_token)
+
+        except Exception as e:
+            logger.error(f"Error creating todo spreadsheet: {e}", exc_info=True)
+            return None
+
+    def _get_tenant_access_token(self) -> Optional[str]:
+        """获取租户访问令牌"""
+        try:
+            import requests
+            resp = requests.post(
+                "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+                json={"app_id": self.app_id, "app_secret": self.app_secret}
+            )
+            data = resp.json()
+            if data.get("code") == 0:
+                return data.get("tenant_access_token")
+            logger.error(f"Failed to get tenant access token: {data}")
+            return None
+        except Exception as e:
+            logger.error(f"Error getting tenant access token: {e}")
             return None
