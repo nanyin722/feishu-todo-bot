@@ -237,34 +237,10 @@ class FeishuClient:
 
             logger.info(f"Created spreadsheet: {spreadsheet_token}")
 
-            # 2. 查询真实 sheet_id（创建接口不返回 sheets 列表）
-            try:
-                sheets_resp = requests.get(
-                    f"https://open.feishu.cn/open-apis/sheets/v3/spreadsheets"
-                    f"/{spreadsheet_token}/sheets",
-                    headers=headers
-                )
-                sheets_data = sheets_resp.json()
-                if sheets_data.get("code") == 0:
-                    sheet_items = sheets_data.get("data", {}).get("sheets", [])
-                    sheet_id = sheet_items[0]["sheet_id"] if sheet_items else None
-                else:
-                    logger.error(f"Failed to get sheet list: {sheets_data}")
-                    sheet_id = None
-            except Exception as e:
-                logger.error(f"Failed to parse sheets response: {e}, raw: {sheets_resp.text[:200]}")
-                sheet_id = None
+            # 2. 写入表头 + 数据（range 不带 sheetId 前缀，默认写入第一个工作表）
+            self._write_spreadsheet_data(spreadsheet_token, todos, headers)
 
-            if not sheet_id:
-                logger.error("Could not determine sheet_id, aborting spreadsheet creation")
-                return None
-
-            logger.info(f"Using sheet_id: {sheet_id}")
-
-            # 3. 写入表头 + 数据（列：任务ID/内容/负责人/创建时间/截止时间/状态/备注）
-            self._write_spreadsheet_data(spreadsheet_token, sheet_id, todos, headers)
-
-            return (spreadsheet_url, spreadsheet_token, sheet_id)
+            return (spreadsheet_url, spreadsheet_token, "default")
 
         except Exception as e:
             logger.error(f"Error creating todo spreadsheet: {e}", exc_info=True)
@@ -272,15 +248,7 @@ class FeishuClient:
 
     def update_todo_spreadsheet(self, spreadsheet_token: str, sheet_id: str, todos: list) -> bool:
         """
-        更新已有飞书电子表格的待办数据（读取备注列后重写，保留用户手动填写的备注）
-
-        Args:
-            spreadsheet_token: 表格 token
-            sheet_id: 工作表 ID
-            todos: Todo 对象列表
-
-        Returns:
-            是否更新成功
+        更新已有飞书电子表格的待办数据（保留用户手动填写的备注列）
         """
         try:
             import requests
@@ -294,38 +262,42 @@ class FeishuClient:
                 "Content-Type": "application/json; charset=utf-8"
             }
 
-            # 1. 读取现有数据，保留备注列（G列，index 6）
-            existing_notes = {}  # {task_id(int): note(str)}
-            read_range = f"{sheet_id}!A2:G1000"
-            read_resp = requests.get(
-                f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets"
-                f"/{spreadsheet_token}/values/{read_range}",
-                headers=headers
-            )
-            read_data = read_resp.json()
-            if read_data.get("code") == 0:
-                rows = read_data.get("data", {}).get("valueRange", {}).get("values", []) or []
-                for row in rows:
-                    if row and row[0]:
-                        try:
-                            task_id = int(str(row[0]))
-                            note = row[6] if len(row) > 6 else ""
-                            existing_notes[task_id] = note or ""
-                        except (ValueError, TypeError):
-                            pass
+            # 1. 读取现有备注列（G列，range 不带 sheetId 前缀，默认第一个工作表）
+            existing_notes = {}
+            read_range = "A2:G1000"
+            try:
+                read_resp = requests.get(
+                    f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets"
+                    f"/{spreadsheet_token}/values/{read_range}",
+                    headers=headers
+                )
+                read_data = read_resp.json()
+                if read_data.get("code") == 0:
+                    rows = read_data.get("data", {}).get("valueRange", {}).get("values", []) or []
+                    for row in rows:
+                        if row and row[0]:
+                            try:
+                                task_id = int(str(row[0]))
+                                note = row[6] if len(row) > 6 else ""
+                                existing_notes[task_id] = note or ""
+                            except (ValueError, TypeError):
+                                pass
+            except Exception as e:
+                logger.warning(f"Failed to read existing notes: {e}")
 
-            # 2. 清除旧数据（从A1开始清除整个有效范围）
-            requests.post(
-                f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets"
-                f"/{spreadsheet_token}/values_batch_clear",
-                headers=headers,
-                json={"ranges": [f"{sheet_id}!A1:G1000"]}
-            )
+            # 2. 清除旧数据
+            try:
+                requests.post(
+                    f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets"
+                    f"/{spreadsheet_token}/values_batch_clear",
+                    headers=headers,
+                    json={"ranges": ["A1:G1000"]}
+                )
+            except Exception as e:
+                logger.warning(f"Failed to clear spreadsheet: {e}")
 
-            # 3. 重写数据（带备注）
-            self._write_spreadsheet_data(
-                spreadsheet_token, sheet_id, todos, headers, existing_notes
-            )
+            # 3. 重写数据
+            self._write_spreadsheet_data(spreadsheet_token, todos, headers, existing_notes)
 
             logger.info(f"Spreadsheet {spreadsheet_token} updated: {len(todos)} todos")
             return True
@@ -334,10 +306,10 @@ class FeishuClient:
             logger.error(f"Error updating spreadsheet: {e}", exc_info=True)
             return False
 
-    def _write_spreadsheet_data(self, spreadsheet_token: str, sheet_id: str,
+    def _write_spreadsheet_data(self, spreadsheet_token: str,
                                 todos: list, headers: dict,
                                 existing_notes: dict = None) -> bool:
-        """写入表头和待办数据到表格（内部公用方法）"""
+        """写入表头和待办数据（range 不带 sheetId 前缀，默认写入第一个工作表）"""
         try:
             import requests
 
@@ -361,7 +333,7 @@ class FeishuClient:
 
             all_rows = header + rows
             end_row = max(len(all_rows), 1)
-            range_str = f"{sheet_id}!A1:G{end_row}"
+            range_str = f"A1:G{end_row}"
 
             write_resp = requests.put(
                 f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets"
