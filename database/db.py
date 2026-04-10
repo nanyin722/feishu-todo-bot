@@ -65,13 +65,6 @@ class Database:
             except Exception:
                 pass
 
-            # 迁移：新增表格同步字段到 reminder_config
-            for col in ("spreadsheet_token TEXT", "spreadsheet_url TEXT", "spreadsheet_sheet_id TEXT"):
-                try:
-                    cursor.execute(f"ALTER TABLE reminder_config ADD COLUMN {col}")
-                except Exception:
-                    pass
-
             # 创建索引
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_chat_deadline
@@ -96,6 +89,13 @@ class Database:
                     enabled BOOLEAN DEFAULT 1
                 )
             """)
+
+            # 迁移：新增表格同步字段到 reminder_config（必须在 CREATE TABLE 之后）
+            for col in ("spreadsheet_token TEXT", "spreadsheet_url TEXT", "spreadsheet_sheet_id TEXT"):
+                try:
+                    cursor.execute(f"ALTER TABLE reminder_config ADD COLUMN {col}")
+                except Exception:
+                    pass
 
             logger.info("Database initialized successfully")
 
