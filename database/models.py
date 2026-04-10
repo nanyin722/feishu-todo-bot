@@ -64,11 +64,14 @@ class ReminderConfig:
     id: Optional[int] = None
     chat_id: str = ""
     weekly_day: int = 1  # 1-7 (周一到周日)
-    weekly_hour: int = 9  # 0-23
+    weekly_hour: int = 10  # 0-23，默认周一10点
     weekly_minute: int = 0  # 0-59
     daily_hour: int = 9  # 0-23
     daily_minute: int = 0  # 0-59
     enabled: bool = True
+    spreadsheet_token: Optional[str] = None   # 自动同步表格的 token
+    spreadsheet_url: Optional[str] = None     # 自动同步表格的访问链接
+    spreadsheet_sheet_id: Optional[str] = None  # 工作表 sheet_id
 
     def to_dict(self):
         """转换为字典"""
@@ -80,7 +83,10 @@ class ReminderConfig:
             'weekly_minute': self.weekly_minute,
             'daily_hour': self.daily_hour,
             'daily_minute': self.daily_minute,
-            'enabled': self.enabled
+            'enabled': self.enabled,
+            'spreadsheet_token': self.spreadsheet_token,
+            'spreadsheet_url': self.spreadsheet_url,
+            'spreadsheet_sheet_id': self.spreadsheet_sheet_id,
         }
 
     @staticmethod
@@ -90,9 +96,12 @@ class ReminderConfig:
             id=data.get('id'),
             chat_id=data.get('chat_id', ''),
             weekly_day=data.get('weekly_day', 1),
-            weekly_hour=data.get('weekly_hour', 9),
+            weekly_hour=data.get('weekly_hour', 10),
             weekly_minute=data.get('weekly_minute', 0),
             daily_hour=data.get('daily_hour', 9),
             daily_minute=data.get('daily_minute', 0),
-            enabled=bool(data.get('enabled', 1))
+            enabled=bool(data.get('enabled', 1)),
+            spreadsheet_token=data.get('spreadsheet_token'),
+            spreadsheet_url=data.get('spreadsheet_url'),
+            spreadsheet_sheet_id=data.get('spreadsheet_sheet_id'),
         )

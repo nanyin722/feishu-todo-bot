@@ -18,7 +18,7 @@ TODO_INTENT_KEYWORDS = [
 
 
 class NaturalDateParser:
-    """中文自然语言日期解析器"""
+    """中文自然语言日期/时间解析器"""
 
     WEEKDAY_CN = {
         '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '日': 7, '天': 7,
@@ -28,14 +28,20 @@ class NaturalDateParser:
     @staticmethod
     def parse(text: str) -> Optional[str]:
         """
-        从自然语言文本中提取日期
-
-        Args:
-            text: 消息文本
+        从自然语言文本中提取日期（含时间）
 
         Returns:
-            YYYY-MM-DD 格式的日期字符串，无法识别则返回 None
+            'YYYY-MM-DD HH:MM' 若识别到时间，否则 'YYYY-MM-DD'，无法识别返回 None
         """
+        date_str = NaturalDateParser._parse_date_only(text)
+        if not date_str:
+            return None
+        time_str = NaturalDateParser._parse_time(text)
+        return f'{date_str} {time_str}' if time_str else date_str
+
+    @staticmethod
+    def _parse_date_only(text: str) -> Optional[str]:
+        """仅解析日期部分，返回 YYYY-MM-DD 或 None"""
         today = date.today()
 
         # 优先匹配精确格式 YYYY-MM-DD
@@ -59,6 +65,10 @@ class NaturalDateParser:
                 return d.strftime('%Y-%m-%d')
             except ValueError:
                 pass
+
+        # 昨天
+        if '昨天' in text or '昨日' in text:
+            return (today - timedelta(days=1)).strftime('%Y-%m-%d')
 
         # 今天
         if '今天' in text or '今日' in text:
@@ -118,6 +128,68 @@ class NaturalDateParser:
 
         return None
 
+    @staticmethod
+    def _parse_time(text: str) -> Optional[str]:
+        """
+        从文本中提取时间点，返回 HH:MM 字符串，无法识别返回 None
+
+        支持：下班前 → 18:00，HH:MM，下午/晚上X点，上午X点，X点半，X点Y分
+        """
+        # 下班前 → 18:00
+        if '下班前' in text:
+            return '18:00'
+
+        # 数字格式 HH:MM（优先处理，避免被中文模式误抢）
+        m = re.search(r'(\d{1,2}):(\d{2})', text)
+        if m:
+            h, minute = int(m.group(1)), int(m.group(2))
+            if 0 <= h <= 23 and 0 <= minute <= 59:
+                return f'{h:02d}:{minute:02d}'
+
+        # 下午/晚上/午后 X点Y分 or X点半 or X点
+        m = re.search(r'(?:下午|晚上|午后)\s*(\d{1,2})[点时](?:(\d{1,2})分|半)?', text)
+        if m:
+            h = int(m.group(1))
+            if m.group(2):
+                minute = int(m.group(2))
+            elif '半' in (m.group(0) or ''):
+                minute = 30
+            else:
+                minute = 0
+            if h < 12:
+                h += 12
+            if 0 <= h <= 23:
+                return f'{h:02d}:{minute:02d}'
+
+        # 上午 X点Y分 or X点半 or X点
+        m = re.search(r'上午\s*(\d{1,2})[点时](?:(\d{1,2})分|半)?', text)
+        if m:
+            h = int(m.group(1))
+            if m.group(2):
+                minute = int(m.group(2))
+            elif '半' in (m.group(0) or ''):
+                minute = 30
+            else:
+                minute = 0
+            if 0 <= h <= 11:
+                return f'{h:02d}:{minute:02d}'
+
+        # X点半（无前缀）
+        m = re.search(r'(\d{1,2})点半', text)
+        if m:
+            h = int(m.group(1))
+            if 0 <= h <= 23:
+                return f'{h:02d}:30'
+
+        # X点Y分（无前缀）
+        m = re.search(r'(\d{1,2})[点时](\d{1,2})分', text)
+        if m:
+            h, minute = int(m.group(1)), int(m.group(2))
+            if 0 <= h <= 23 and 0 <= minute <= 59:
+                return f'{h:02d}:{minute:02d}'
+
+        return None
+
 
 class TodoParser:
     """待办消息解析器（支持自然语言，无需固定格式）"""
@@ -174,9 +246,20 @@ class TodoParser:
             r'\d{1,2}月\d{1,2}[日号]',
             r'[本这下]+周[一二三四五六日天1-7]',
             r'\d+天[后内]',
-            r'今天|今日|明天|明日|后天|大后天|月底',
+            r'昨天|昨日|今天|今日|明天|明日|后天|大后天|月底',
         ]
         for pat in date_patterns:
+            text = re.sub(pat, '', text)
+
+        # 移除时间表达
+        time_patterns = [
+            r'下班前',
+            r'\d{1,2}:\d{2}',
+            r'(?:下午|晚上|午后|上午)\s*\d{1,2}[点时](?:\d{1,2}分|半)?',
+            r'\d{1,2}点半',
+            r'\d{1,2}[点时]\d{1,2}分',
+        ]
+        for pat in time_patterns:
             text = re.sub(pat, '', text)
 
         # 移除"待办："前缀

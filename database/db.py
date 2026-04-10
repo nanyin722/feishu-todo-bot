@@ -65,6 +65,13 @@ class Database:
             except Exception:
                 pass
 
+            # 迁移：新增表格同步字段到 reminder_config
+            for col in ("spreadsheet_token TEXT", "spreadsheet_url TEXT", "spreadsheet_sheet_id TEXT"):
+                try:
+                    cursor.execute(f"ALTER TABLE reminder_config ADD COLUMN {col}")
+                except Exception:
+                    pass
+
             # 创建索引
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_chat_deadline
@@ -141,12 +148,12 @@ class Database:
             return [Todo.from_dict(dict(row)) for row in rows]
 
     def get_todos_by_deadline(self, deadline: date, reminded: bool = False) -> List[Todo]:
-        """获取指定日期到期的待办"""
+        """获取指定日期到期的待办（兼容含时间的 deadline 字符串）"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT * FROM todos
-                WHERE deadline = ? AND completed = 0 AND reminded_daily = ?
+                WHERE date(deadline) = ? AND completed = 0 AND reminded_daily = ?
                 ORDER BY chat_id, created_at ASC
             """, (deadline.strftime('%Y-%m-%d'), 1 if reminded else 0))
 
@@ -213,13 +220,31 @@ class Database:
             cursor.execute("""
                 INSERT OR REPLACE INTO reminder_config
                 (chat_id, weekly_day, weekly_hour, weekly_minute,
-                 daily_hour, daily_minute, enabled)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                 daily_hour, daily_minute, enabled,
+                 spreadsheet_token, spreadsheet_url, spreadsheet_sheet_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (config.chat_id, config.weekly_day, config.weekly_hour,
                   config.weekly_minute, config.daily_hour, config.daily_minute,
-                  config.enabled))
+                  config.enabled, config.spreadsheet_token,
+                  config.spreadsheet_url, config.spreadsheet_sheet_id))
 
             logger.info(f"Saved reminder config for chat {config.chat_id}")
+            return True
+
+    def save_spreadsheet_info(self, chat_id: str, token: str, url: str, sheet_id: str) -> bool:
+        """保存（或更新）群组关联的飞书表格信息"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            # 确保该群有配置行
+            cursor.execute("""
+                INSERT OR IGNORE INTO reminder_config (chat_id) VALUES (?)
+            """, (chat_id,))
+            cursor.execute("""
+                UPDATE reminder_config
+                SET spreadsheet_token = ?, spreadsheet_url = ?, spreadsheet_sheet_id = ?
+                WHERE chat_id = ?
+            """, (token, url, sheet_id, chat_id))
+            logger.info(f"Saved spreadsheet info for chat {chat_id}: {token}")
             return True
 
     def get_all_enabled_chats(self) -> List[str]:

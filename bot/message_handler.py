@@ -125,13 +125,19 @@ class MessageHandler:
 
             content, deadline = result
 
-            # 提取负责人（消息中@的非机器人用户）
-            assignee_id = None
-            assignee_name = None
+            # 提取负责人（消息中@的所有非机器人用户）
+            assignee_ids = []
+            assignee_names = []
             if non_bot_mentions:
-                first = non_bot_mentions[0]
-                assignee_id = first.get('id', {}).get('open_id', '') or first.get('open_id', '')
-                assignee_name = first.get('name', '')
+                for m in non_bot_mentions:
+                    aid = m.get('id', {}).get('open_id', '') or m.get('open_id', '')
+                    aname = m.get('name', '')
+                    if aid:
+                        assignee_ids.append(aid)
+                        assignee_names.append(aname)
+
+            assignee_id = ','.join(assignee_ids) if assignee_ids else None
+            assignee_name = ','.join(assignee_names) if assignee_names else None
 
             # 创建待办对象
             todo = Todo(
@@ -147,8 +153,11 @@ class MessageHandler:
             # 保存到数据库
             todo_id = self.database.add_todo(todo)
 
+            # 触发表格同步
+            self._sync_spreadsheet(chat_id)
+
             # 构建确认消息
-            deadline_str = f"\n截止日期: {deadline}" if deadline else "\n截止日期: 未设置"
+            deadline_str = f"\n截止时间: {deadline}" if deadline else "\n截止时间: 未设置"
             assignee_str = f"\n负责人: {assignee_name}" if assignee_name else ""
             reply = (
                 f"✅ 待办已添加\n\n"
@@ -245,7 +254,7 @@ class MessageHandler:
                 if not todo.deadline:
                     later.append(todo)
                     continue
-                deadline_date = datetime.strptime(todo.deadline, '%Y-%m-%d').date()
+                deadline_date = datetime.strptime(todo.deadline[:10], '%Y-%m-%d').date()
                 days_diff = (deadline_date - today).days
 
                 if days_diff < 0:
@@ -268,7 +277,7 @@ class MessageHandler:
             if overdue:
                 lines.append("🔴 已逾期：")
                 for todo in overdue:
-                    days_ago = (today - datetime.strptime(todo.deadline, '%Y-%m-%d').date()).days
+                    days_ago = (today - datetime.strptime(todo.deadline[:10], '%Y-%m-%d').date()).days
                     lines.append(f"{_fmt(todo)} (逾期{days_ago}天)")
                 lines.append("")
 
@@ -324,6 +333,7 @@ class MessageHandler:
 
             # 标记完成
             if self.database.complete_todo(todo_id):
+                self._sync_spreadsheet(chat_id)
                 reply = f"✅ 任务 {todo_id} 已完成\n\n{todo.content}"
                 self.feishu_client.send_text_message(chat_id, reply)
             else:
@@ -369,6 +379,7 @@ class MessageHandler:
 
             # 删除待办
             if self.database.delete_todo(todo_id):
+                self._sync_spreadsheet(chat_id)
                 reply = f"✅ 任务 {todo_id} 已删除"
                 self.feishu_client.send_text_message(chat_id, reply)
             else:
@@ -417,20 +428,35 @@ class MessageHandler:
     def handle_table_command(self, chat_id: str) -> bool:
         """处理生成表格命令"""
         try:
-            todos = self.database.get_todos_by_chat(chat_id, include_completed=False)
+            config = self.database.get_reminder_config(chat_id)
 
-            # 调用飞书客户端创建表格
-            result = self.feishu_client.create_todo_spreadsheet(chat_id, todos)
+            if config.spreadsheet_url and config.spreadsheet_token:
+                # 已有表格：同步最新数据（若 sheet_id 有误会自动清除绑定）
+                self._sync_spreadsheet(chat_id)
+                # 同步后重新读取，检查绑定是否仍有效
+                config = self.database.get_reminder_config(chat_id)
 
-            if result:
-                sheet_url, sheet_token = result
+            if config.spreadsheet_url and config.spreadsheet_token and config.spreadsheet_sheet_id:
                 reply = (
-                    f"📊 待办表格已生成，可手动修改\n\n"
-                    f"🔗 {sheet_url}\n\n"
-                    f"字段：内容 / 负责人 / 创建时间 / 截止时间 / 状态 / 备注"
+                    f"📊 待办表格（已同步最新数据）\n\n"
+                    f"🔗 {config.spreadsheet_url}\n\n"
+                    f"字段：任务ID / 内容 / 负责人 / 创建时间 / 截止时间 / 状态 / 备注"
                 )
             else:
-                reply = "❌ 生成表格失败，请检查机器人是否有云文档权限"
+                # 没有表格或绑定已被清除：创建新表格
+                todos = self.database.get_todos_by_chat(chat_id, include_completed=False)
+                result = self.feishu_client.create_todo_spreadsheet(chat_id, todos)
+
+                if result:
+                    sheet_url, sheet_token, sheet_id = result
+                    self.database.save_spreadsheet_info(chat_id, sheet_token, sheet_url, sheet_id)
+                    reply = (
+                        f"📊 待办表格已生成，可手动修改\n\n"
+                        f"🔗 {sheet_url}\n\n"
+                        f"字段：任务ID / 内容 / 负责人 / 创建时间 / 截止时间 / 状态 / 备注"
+                    )
+                else:
+                    reply = "❌ 生成表格失败，请检查机器人是否有云文档权限"
 
             self.feishu_client.send_text_message(chat_id, reply)
             return True
@@ -479,3 +505,27 @@ class MessageHandler:
         except Exception as e:
             logger.error(f"Error handling help command: {e}", exc_info=True)
             return False
+
+    def _sync_spreadsheet(self, chat_id: str):
+        """
+        将当前群组的待办数据同步到飞书表格（如有关联表格则更新，否则静默跳过）
+        """
+        try:
+            config = self.database.get_reminder_config(chat_id)
+            if not config.spreadsheet_token or not config.spreadsheet_sheet_id:
+                return  # 尚未关联表格，跳过同步
+
+            # 检测历史遗留的错误 sheet_id，自动清除绑定等待重新生成
+            if config.spreadsheet_sheet_id == "Sheet1":
+                logger.warning(f"Invalid sheet_id 'Sheet1' detected for chat {chat_id}, clearing binding")
+                self.database.save_spreadsheet_info(chat_id, None, None, None)
+                return
+
+            todos = self.database.get_todos_by_chat(chat_id, include_completed=False)
+            self.feishu_client.update_todo_spreadsheet(
+                config.spreadsheet_token,
+                config.spreadsheet_sheet_id,
+                todos
+            )
+        except Exception as e:
+            logger.error(f"Error syncing spreadsheet for chat {chat_id}: {e}", exc_info=True)

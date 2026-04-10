@@ -3,6 +3,7 @@
 """
 import json
 import logging
+from collections import deque
 from flask import Flask, request, jsonify
 
 from config.settings import settings
@@ -47,6 +48,9 @@ logger.info("Reminder service initialized")
 scheduler_manager = create_scheduler(reminder_service)
 logger.info("Scheduler manager created")
 
+# 已处理的事件ID集合（内存去重，防止飞书 webhook 重试导致重复处理）
+_processed_event_ids: deque = deque(maxlen=500)
+
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -89,6 +93,14 @@ def handle_event():
         if token != settings.FEISHU_VERIFICATION_TOKEN:
             logger.warning(f"Invalid verification token: {token}")
             return jsonify({'error': 'Invalid token'}), 401
+
+        # 事件去重（防止飞书 webhook 重试导致重复处理）
+        event_id = data.get('header', {}).get('event_id', '')
+        if event_id:
+            if event_id in _processed_event_ids:
+                logger.info(f"Duplicate event ignored: {event_id}")
+                return jsonify({'msg': 'ok'})
+            _processed_event_ids.append(event_id)
 
         # 处理事件回调
         if data.get('header', {}).get('event_type') == 'im.message.receive_v1':

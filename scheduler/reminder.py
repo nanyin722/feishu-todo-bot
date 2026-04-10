@@ -70,7 +70,7 @@ class ReminderService:
                 if not todo.deadline:
                     later.append(todo)
                     continue
-                deadline_date = datetime.strptime(todo.deadline, '%Y-%m-%d').date()
+                deadline_date = datetime.strptime(todo.deadline[:10], '%Y-%m-%d').date()
                 days_diff = (deadline_date - today).days
 
                 if days_diff < 0:
@@ -82,11 +82,16 @@ class ReminderService:
                 else:
                     later.append(todo)
 
-            # 收集所有需要@的负责人
-            at_ids = list({
-                todo.assignee_id for todo in todos
-                if todo.assignee_id
-            })
+            # 收集所有需要@的负责人（支持逗号分隔的多负责人）
+            seen_ids = set()
+            at_ids = []
+            for todo in todos:
+                if todo.assignee_id:
+                    for aid in todo.assignee_id.split(','):
+                        aid = aid.strip()
+                        if aid and aid not in seen_ids:
+                            seen_ids.add(aid)
+                            at_ids.append(aid)
 
             # 构建提醒消息
             message = self._build_weekly_reminder_message(
@@ -121,7 +126,7 @@ class ReminderService:
             lines.append("🔴 已逾期：")
             for todo in overdue:
                 today = date.today()
-                days_ago = (today - datetime.strptime(todo.deadline, '%Y-%m-%d').date()).days
+                days_ago = (today - datetime.strptime(todo.deadline[:10], '%Y-%m-%d').date()).days
                 lines.append(f"{_fmt(todo)} (逾期{days_ago}天)")
             lines.append("")
 
@@ -193,11 +198,16 @@ class ReminderService:
 
             message = "\n".join(lines)
 
-            # 收集该群到期任务的负责人
-            at_ids = list({
-                todo.assignee_id for todo in todos
-                if todo.assignee_id
-            })
+            # 收集该群到期任务的负责人（支持逗号分隔的多负责人）
+            seen_ids = set()
+            at_ids = []
+            for todo in todos:
+                if todo.assignee_id:
+                    for aid in todo.assignee_id.split(','):
+                        aid = aid.strip()
+                        if aid and aid not in seen_ids:
+                            seen_ids.add(aid)
+                            at_ids.append(aid)
 
             # @负责人，无负责人则@所有人
             if at_ids:
@@ -227,7 +237,7 @@ class ReminderService:
                 overdue = [
                     t for t in todos
                     if t.deadline and
-                    datetime.strptime(t.deadline, '%Y-%m-%d').date() < today
+                    datetime.strptime(t.deadline[:10], '%Y-%m-%d').date() < today
                 ]
 
                 if not overdue:
@@ -235,7 +245,7 @@ class ReminderService:
 
                 lines = ["⚠️ 逾期待办提醒\n以下任务已超过截止日期：\n"]
                 for todo in overdue:
-                    days_ago = (today - datetime.strptime(todo.deadline, '%Y-%m-%d').date()).days
+                    days_ago = (today - datetime.strptime(todo.deadline[:10], '%Y-%m-%d').date()).days
                     assignee = f" 👤{todo.assignee_name}" if todo.assignee_name else ""
                     lines.append(
                         f"• [{todo.id}] 【{todo.user_name}】{todo.content}{assignee}"
@@ -245,7 +255,15 @@ class ReminderService:
                 lines.append("\n请尽快处理！回复 @机器人 完成 <任务ID> 可标记完成")
                 message = "\n".join(lines)
 
-                at_ids = list({t.assignee_id for t in overdue if t.assignee_id})
+                seen_ids = set()
+                at_ids = []
+                for t in overdue:
+                    if t.assignee_id:
+                        for aid in t.assignee_id.split(','):
+                            aid = aid.strip()
+                            if aid and aid not in seen_ids:
+                                seen_ids.add(aid)
+                                at_ids.append(aid)
                 if at_ids:
                     self.feishu_client.send_text_message_with_at_users(chat_id, message, at_ids)
                 else:

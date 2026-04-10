@@ -189,7 +189,7 @@ class FeishuClient:
             logger.error(f"Error getting user info: {e}")
             return None
 
-    def create_todo_spreadsheet(self, chat_id: str, todos: list) -> Optional[Tuple[str, str]]:
+    def create_todo_spreadsheet(self, chat_id: str, todos: list) -> Optional[Tuple[str, str, str]]:
         """
         创建飞书电子表格并写入待办数据
 
@@ -198,7 +198,7 @@ class FeishuClient:
             todos: Todo 对象列表
 
         Returns:
-            (spreadsheet_url, spreadsheet_token)，失败返回 None
+            (spreadsheet_url, spreadsheet_token, sheet_id)，失败返回 None
         """
         try:
             import requests
@@ -230,31 +230,130 @@ class FeishuClient:
 
             spreadsheet_token = create_data["data"]["spreadsheet"]["spreadsheet_token"]
             spreadsheet_url = create_data["data"]["spreadsheet"]["url"]
-            sheet_id = create_data["data"]["spreadsheet"]["sheets"][0]["sheet_id"] \
-                if create_data["data"]["spreadsheet"].get("sheets") else "Sheet1"
 
             logger.info(f"Created spreadsheet: {spreadsheet_token}")
 
-            # 2. 写入表头 + 数据
-            header = [["内容", "负责人", "创建时间", "截止时间", "状态", "备注"]]
+            # 2. 查询真实 sheet_id（创建接口不返回 sheets 列表）
+            sheets_resp = requests.get(
+                f"https://open.feishu.cn/open-apis/sheets/v3/spreadsheets"
+                f"/{spreadsheet_token}/sheets",
+                headers=headers
+            )
+            sheets_data = sheets_resp.json()
+            if sheets_data.get("code") == 0:
+                sheet_items = sheets_data.get("data", {}).get("sheets", [])
+                sheet_id = sheet_items[0]["sheet_id"] if sheet_items else "Sheet1"
+            else:
+                logger.error(f"Failed to get sheet list: {sheets_data}")
+                sheet_id = "Sheet1"
+
+            logger.info(f"Using sheet_id: {sheet_id}")
+
+            # 3. 写入表头 + 数据（列：任务ID/内容/负责人/创建时间/截止时间/状态/备注）
+            self._write_spreadsheet_data(spreadsheet_token, sheet_id, todos, headers)
+
+            return (spreadsheet_url, spreadsheet_token, sheet_id)
+
+        except Exception as e:
+            logger.error(f"Error creating todo spreadsheet: {e}", exc_info=True)
+            return None
+
+    def update_todo_spreadsheet(self, spreadsheet_token: str, sheet_id: str, todos: list) -> bool:
+        """
+        更新已有飞书电子表格的待办数据（读取备注列后重写，保留用户手动填写的备注）
+
+        Args:
+            spreadsheet_token: 表格 token
+            sheet_id: 工作表 ID
+            todos: Todo 对象列表
+
+        Returns:
+            是否更新成功
+        """
+        try:
+            import requests
+
+            token = self._get_tenant_access_token()
+            if not token:
+                return False
+
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json; charset=utf-8"
+            }
+
+            # 1. 读取现有数据，保留备注列（G列，index 6）
+            existing_notes = {}  # {task_id(int): note(str)}
+            read_range = f"{sheet_id}!A2:G1000"
+            read_resp = requests.get(
+                f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets"
+                f"/{spreadsheet_token}/values/{read_range}",
+                headers=headers
+            )
+            read_data = read_resp.json()
+            if read_data.get("code") == 0:
+                rows = read_data.get("data", {}).get("valueRange", {}).get("values", []) or []
+                for row in rows:
+                    if row and row[0]:
+                        try:
+                            task_id = int(str(row[0]))
+                            note = row[6] if len(row) > 6 else ""
+                            existing_notes[task_id] = note or ""
+                        except (ValueError, TypeError):
+                            pass
+
+            # 2. 清除旧数据（从A1开始清除整个有效范围）
+            requests.post(
+                f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets"
+                f"/{spreadsheet_token}/values_batch_clear",
+                headers=headers,
+                json={"ranges": [f"{sheet_id}!A1:G1000"]}
+            )
+
+            # 3. 重写数据（带备注）
+            self._write_spreadsheet_data(
+                spreadsheet_token, sheet_id, todos, headers, existing_notes
+            )
+
+            logger.info(f"Spreadsheet {spreadsheet_token} updated: {len(todos)} todos")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error updating spreadsheet: {e}", exc_info=True)
+            return False
+
+    def _write_spreadsheet_data(self, spreadsheet_token: str, sheet_id: str,
+                                todos: list, headers: dict,
+                                existing_notes: dict = None) -> bool:
+        """写入表头和待办数据到表格（内部公用方法）"""
+        try:
+            import requests
+
+            if existing_notes is None:
+                existing_notes = {}
+
+            header = [["任务ID", "内容", "负责人", "创建时间", "截止时间", "状态", "备注"]]
             rows = []
             for todo in todos:
                 status = "已完成" if todo.completed else "进行中"
+                note = existing_notes.get(todo.id, "")
                 rows.append([
+                    str(todo.id),
                     todo.content or "",
                     todo.assignee_name or todo.user_name or "",
                     todo.created_at or "",
                     todo.deadline or "未设置",
                     status,
-                    ""  # 备注留空供手动填写
+                    note
                 ])
 
             all_rows = header + rows
-            end_row = len(all_rows)
-            range_str = f"{sheet_id}!A1:F{end_row}"
+            end_row = max(len(all_rows), 1)
+            range_str = f"{sheet_id}!A1:G{end_row}"
 
             write_resp = requests.put(
-                f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values",
+                f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets"
+                f"/{spreadsheet_token}/values",
                 headers=headers,
                 json={
                     "valueRange": {
@@ -267,15 +366,14 @@ class FeishuClient:
 
             if write_data.get("code") != 0:
                 logger.error(f"Failed to write spreadsheet data: {write_data}")
-                # 表格已创建，仍返回 URL
-                return (spreadsheet_url, spreadsheet_token)
+                return False
 
             logger.info(f"Spreadsheet data written: {len(rows)} rows")
-            return (spreadsheet_url, spreadsheet_token)
+            return True
 
         except Exception as e:
-            logger.error(f"Error creating todo spreadsheet: {e}", exc_info=True)
-            return None
+            logger.error(f"Error writing spreadsheet data: {e}", exc_info=True)
+            return False
 
     def _get_tenant_access_token(self) -> Optional[str]:
         """获取租户访问令牌"""
