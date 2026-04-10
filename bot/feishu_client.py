@@ -222,7 +222,11 @@ class FeishuClient:
                 headers=headers,
                 json={"title": title}
             )
-            create_data = create_resp.json()
+            try:
+                create_data = create_resp.json()
+            except Exception as e:
+                logger.error(f"Failed to parse create response: {e}, raw: {create_resp.text[:200]}")
+                return None
 
             if create_data.get("code") != 0:
                 logger.error(f"Failed to create spreadsheet: {create_data}")
@@ -234,18 +238,26 @@ class FeishuClient:
             logger.info(f"Created spreadsheet: {spreadsheet_token}")
 
             # 2. 查询真实 sheet_id（创建接口不返回 sheets 列表）
-            sheets_resp = requests.get(
-                f"https://open.feishu.cn/open-apis/sheets/v3/spreadsheets"
-                f"/{spreadsheet_token}/sheets",
-                headers=headers
-            )
-            sheets_data = sheets_resp.json()
-            if sheets_data.get("code") == 0:
-                sheet_items = sheets_data.get("data", {}).get("sheets", [])
-                sheet_id = sheet_items[0]["sheet_id"] if sheet_items else "Sheet1"
-            else:
-                logger.error(f"Failed to get sheet list: {sheets_data}")
-                sheet_id = "Sheet1"
+            try:
+                sheets_resp = requests.get(
+                    f"https://open.feishu.cn/open-apis/sheets/v3/spreadsheets"
+                    f"/{spreadsheet_token}/sheets",
+                    headers=headers
+                )
+                sheets_data = sheets_resp.json()
+                if sheets_data.get("code") == 0:
+                    sheet_items = sheets_data.get("data", {}).get("sheets", [])
+                    sheet_id = sheet_items[0]["sheet_id"] if sheet_items else None
+                else:
+                    logger.error(f"Failed to get sheet list: {sheets_data}")
+                    sheet_id = None
+            except Exception as e:
+                logger.error(f"Failed to parse sheets response: {e}, raw: {sheets_resp.text[:200]}")
+                sheet_id = None
+
+            if not sheet_id:
+                logger.error("Could not determine sheet_id, aborting spreadsheet creation")
+                return None
 
             logger.info(f"Using sheet_id: {sheet_id}")
 
@@ -362,7 +374,11 @@ class FeishuClient:
                     }
                 }
             )
-            write_data = write_resp.json()
+            try:
+                write_data = write_resp.json()
+            except Exception as e:
+                logger.error(f"Failed to parse write response: {e}, raw: {write_resp.text[:200]}")
+                return False
 
             if write_data.get("code") != 0:
                 logger.error(f"Failed to write spreadsheet data: {write_data}")
