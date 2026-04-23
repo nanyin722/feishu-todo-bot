@@ -22,6 +22,34 @@ class FeishuClient:
             .app_secret(app_secret) \
             .log_level(lark.LogLevel.INFO) \
             .build()
+        self._bot_open_id = None  # 机器人自身 open_id，懒加载
+
+    @property
+    def bot_open_id(self) -> Optional[str]:
+        """获取机器人自身的 open_id（懒加载）"""
+        if self._bot_open_id is None:
+            self._bot_open_id = self._fetch_bot_open_id()
+        return self._bot_open_id
+
+    def _fetch_bot_open_id(self) -> Optional[str]:
+        """通过 /bot/v3/info 获取机器人自身的 open_id"""
+        try:
+            import requests
+            token = self._get_tenant_access_token()
+            if not token:
+                return None
+            resp = requests.get(
+                "https://open.feishu.cn/open-apis/bot/v3/info",
+                headers={"Authorization": f"Bearer {token}"}
+            )
+            data = resp.json()
+            if data.get("code") == 0:
+                return data.get("bot", {}).get("open_id")
+            logger.warning(f"Failed to get bot info: {data}")
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching bot open_id: {e}")
+            return None
 
     def send_message(self, receive_id: str, msg_type: str, content: str,
                      receive_id_type: str = "chat_id") -> bool:
@@ -189,7 +217,8 @@ class FeishuClient:
             logger.error(f"Error getting user info: {e}")
             return None
 
-    def create_todo_spreadsheet(self, chat_id: str, todos: list) -> Optional[Tuple[str, str, str]]:
+    def create_todo_spreadsheet(self, chat_id: str, todos: list,
+                                user_id: str = None) -> Optional[Tuple[str, str, str]]:
         """
         创建飞书电子表格并写入待办数据
 
@@ -260,6 +289,49 @@ class FeishuClient:
             # 3. 写入表头 + 数据
             self._write_spreadsheet_data(spreadsheet_token, sheet_id, todos, headers)
 
+            # 4. 设置群组可编辑权限
+            try:
+                perm_resp = requests.post(
+                    f"https://open.feishu.cn/open-apis/drive/v1/permissions"
+                    f"/{spreadsheet_token}/members",
+                    params={"type": "sheet"},
+                    headers=headers,
+                    json={
+                        "member_type": "openchat",
+                        "member_id": chat_id,
+                        "perm": "edit"
+                    }
+                )
+                perm_data = perm_resp.json()
+                if perm_data.get("code") != 0:
+                    logger.warning(f"Failed to set spreadsheet permission: {perm_data}")
+                else:
+                    logger.info(f"Set edit permission for chat {chat_id}")
+            except Exception as e:
+                logger.warning(f"Error setting spreadsheet permission: {e}")
+
+            # 5. 给发起者设置管理权限
+            if user_id:
+                try:
+                    user_perm_resp = requests.post(
+                        f"https://open.feishu.cn/open-apis/drive/v1/permissions"
+                        f"/{spreadsheet_token}/members",
+                        params={"type": "sheet"},
+                        headers=headers,
+                        json={
+                            "member_type": "openid",
+                            "member_id": user_id,
+                            "perm": "full_access"
+                        }
+                    )
+                    user_perm_data = user_perm_resp.json()
+                    if user_perm_data.get("code") != 0:
+                        logger.warning(f"Failed to set user permission: {user_perm_data}")
+                    else:
+                        logger.info(f"Set full_access permission for user {user_id}")
+                except Exception as e:
+                    logger.warning(f"Error setting user permission: {e}")
+
             return (spreadsheet_url, spreadsheet_token, sheet_id)
 
         except Exception as e:
@@ -324,6 +396,139 @@ class FeishuClient:
 
         except Exception as e:
             logger.error(f"Error updating spreadsheet: {e}", exc_info=True)
+            return False
+
+    def append_todo_row(self, spreadsheet_token: str, sheet_id: str,
+                        todo, todo_id: int) -> bool:
+        """在表格末尾追加一行待办（不覆盖已有数据）"""
+        try:
+            import requests
+
+            token = self._get_tenant_access_token()
+            if not token:
+                return False
+
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json; charset=utf-8"
+            }
+
+            # 读取A列，找到最后一个有数据的行
+            read_range = f"{sheet_id}!A1:A2000"
+            read_resp = requests.get(
+                f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets"
+                f"/{spreadsheet_token}/values/{read_range}",
+                headers=headers
+            )
+            rows = read_resp.json().get("data", {}).get("valueRange", {}).get("values", []) or []
+
+            last_row = 1
+            for i in range(len(rows) - 1, -1, -1):
+                if rows[i] and rows[i][0]:
+                    last_row = i + 1
+                    break
+
+            next_row = last_row + 1
+
+            # 写入新行
+            status = "已完成" if todo.completed else "进行中"
+            row_data = [
+                str(todo_id),
+                todo.content or "",
+                todo.assignee_name or todo.user_name or "",
+                todo.created_at or "",
+                todo.deadline or "未设置",
+                status,
+                ""
+            ]
+
+            range_str = f"{sheet_id}!A{next_row}:G{next_row}"
+            write_resp = requests.put(
+                f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets"
+                f"/{spreadsheet_token}/values",
+                headers=headers,
+                json={"valueRange": {"range": range_str, "values": [row_data]}}
+            )
+            try:
+                write_data = write_resp.json()
+            except Exception as e:
+                logger.error(f"Failed to parse append response: {e}, raw: {write_resp.text[:200]}")
+                return False
+
+            if write_data.get("code") != 0:
+                logger.error(f"Failed to append todo row: {write_data}")
+                return False
+
+            logger.info(f"Appended todo {todo_id} to row {next_row}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error appending todo row: {e}", exc_info=True)
+            return False
+
+    def update_todo_status_row(self, spreadsheet_token: str, sheet_id: str,
+                               todo_id: int, status: str) -> bool:
+        """更新表格中指定任务的状态列（F列）"""
+        try:
+            import requests
+
+            token = self._get_tenant_access_token()
+            if not token:
+                return False
+
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json; charset=utf-8"
+            }
+
+            # 读取A列找到对应行号
+            read_range = f"{sheet_id}!A1:A2000"
+            read_resp = requests.get(
+                f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets"
+                f"/{spreadsheet_token}/values/{read_range}",
+                headers=headers
+            )
+            rows = read_resp.json().get("data", {}).get("valueRange", {}).get("values", []) or []
+
+            target_row = None
+            for i, row in enumerate(rows):
+                if i == 0:
+                    continue  # 跳过表头
+                if row and row[0]:
+                    try:
+                        if int(str(row[0])) == todo_id:
+                            target_row = i + 1  # 转为1-based行号
+                            break
+                    except (ValueError, TypeError):
+                        pass
+
+            if not target_row:
+                logger.warning(f"Todo {todo_id} not found in spreadsheet, skipping status update")
+                return False
+
+            # 更新F列（状态）
+            range_str = f"{sheet_id}!F{target_row}"
+            write_resp = requests.put(
+                f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets"
+                f"/{spreadsheet_token}/values",
+                headers=headers,
+                json={"valueRange": {"range": range_str, "values": [[status]]}}
+            )
+            try:
+                write_data = write_resp.json()
+            except Exception as e:
+                logger.error(f"Failed to parse status update response: {e}")
+                return False
+
+            if write_data.get("code") != 0:
+                logger.error(f"Failed to update todo status: {write_data}")
+                return False
+
+            logger.info(f"Updated todo {todo_id} status to '{status}' at row {target_row}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error updating todo status row: {e}", exc_info=True)
             return False
 
     def _write_spreadsheet_data(self, spreadsheet_token: str, sheet_id: str,

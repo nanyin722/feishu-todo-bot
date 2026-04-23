@@ -19,6 +19,44 @@ class ReminderService:
         self.feishu_client = feishu_client
         self.database = database
 
+    def _get_completed_from_spreadsheet(self, chat_id: str) -> set:
+        """从表格读取已手动标记为'已完成'的任务ID集合"""
+        try:
+            import requests
+
+            config = self.database.get_reminder_config(chat_id)
+            if not config.spreadsheet_token or not config.spreadsheet_sheet_id:
+                return set()
+
+            token = self.feishu_client._get_tenant_access_token()
+            if not token:
+                return set()
+
+            headers = {"Authorization": f"Bearer {token}"}
+            read_range = f"{config.spreadsheet_sheet_id}!A2:F2000"
+            resp = requests.get(
+                f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets"
+                f"/{config.spreadsheet_token}/values/{read_range}",
+                headers=headers
+            )
+            data = resp.json()
+            completed_ids = set()
+            if data.get("code") == 0:
+                rows = data.get("data", {}).get("valueRange", {}).get("values", []) or []
+                for row in rows:
+                    if row and len(row) >= 6 and row[0]:
+                        try:
+                            task_id = int(str(row[0]))
+                            status = str(row[5]) if row[5] else ""
+                            if "已完成" in status:
+                                completed_ids.add(task_id)
+                        except (ValueError, TypeError):
+                            pass
+            return completed_ids
+        except Exception as e:
+            logger.warning(f"Failed to read spreadsheet status for chat {chat_id}: {e}")
+            return set()
+
     def send_weekly_reminder(self):
         """
         发送每周统一提醒。
@@ -54,6 +92,11 @@ class ReminderService:
         try:
             # 获取未完成的待办
             todos = self.database.get_todos_by_chat(chat_id, include_completed=False)
+
+            # 排除表格中已手动标记为已完成的任务
+            completed_in_sheet = self._get_completed_from_spreadsheet(chat_id)
+            if completed_in_sheet:
+                todos = [t for t in todos if t.id not in completed_in_sheet]
 
             if not todos:
                 logger.info(f"No todos for chat {chat_id}, skipping reminder")
@@ -175,7 +218,12 @@ class ReminderService:
 
             # 为每个群组发送提醒
             for chat_id, chat_todos in todos_by_chat.items():
-                self._send_deadline_reminder_for_chat(chat_id, chat_todos)
+                # 排除表格中已手动标记为已完成的任务
+                completed_in_sheet = self._get_completed_from_spreadsheet(chat_id)
+                if completed_in_sheet:
+                    chat_todos = [t for t in chat_todos if t.id not in completed_in_sheet]
+                if chat_todos:
+                    self._send_deadline_reminder_for_chat(chat_id, chat_todos)
 
             logger.info(f"Daily deadline reminder completed for {len(todos_by_chat)} chats")
 
@@ -239,6 +287,14 @@ class ReminderService:
                     if t.deadline and
                     datetime.strptime(t.deadline[:10], '%Y-%m-%d').date() < today
                 ]
+
+                if not overdue:
+                    continue
+
+                # 排除表格中已手动标记为已完成的任务
+                completed_in_sheet = self._get_completed_from_spreadsheet(chat_id)
+                if completed_in_sheet:
+                    overdue = [t for t in overdue if t.id not in completed_in_sheet]
 
                 if not overdue:
                     continue

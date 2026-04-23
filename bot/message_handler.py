@@ -68,6 +68,13 @@ class MessageHandler:
             mentions = message.get('mentions', [])
 
             if mentions:
+                # 过滤掉机器人自身，只保留真实用户
+                bot_open_id = self.feishu_client.bot_open_id
+                non_bot_mentions = [
+                    m for m in mentions
+                    if not bot_open_id or m.get('id', {}).get('open_id', '') != bot_open_id
+                ]
+
                 # 清理 @名字 和 @_user_N 占位符，得到纯指令文本
                 clean = text
                 for m in mentions:
@@ -87,8 +94,8 @@ class MessageHandler:
                     # @机器人 + 命令 → 命令处理
                     return self.handle_command(chat_id, user_id, user_name, text, mentions, [])
                 else:
-                    # @了某人 + 非命令内容 → 待办，@的人作为负责人
-                    return self.handle_todo_message(chat_id, user_id, user_name, text, mentions)
+                    # @了某人 + 非命令内容 → 待办，@的真实用户作为负责人（已排除机器人）
+                    return self.handle_todo_message(chat_id, user_id, user_name, text, non_bot_mentions)
 
             # 无@：自然语言关键词检测
             if self.todo_parser.is_todo_message(text, has_non_bot_mentions=False):
@@ -152,9 +159,10 @@ class MessageHandler:
 
             # 保存到数据库
             todo_id = self.database.add_todo(todo)
+            todo.id = todo_id
 
-            # 触发表格同步
-            self._sync_spreadsheet(chat_id)
+            # 追加到表格末尾（不覆盖已有数据）
+            self._append_todo_to_spreadsheet(chat_id, todo_id, todo)
 
             # 构建确认消息
             deadline_str = f"\n截止时间: {deadline}" if deadline else "\n截止时间: 未设置"
@@ -218,7 +226,7 @@ class MessageHandler:
 
             # 生成表格
             if self.command_parser.is_command(clean_text, ['生成表格', '导出表格', '表格']):
-                return self.handle_table_command(chat_id)
+                return self.handle_table_command(chat_id, user_id)
 
             # 帮助
             if self.command_parser.is_command(clean_text, ['帮助', 'help', '使用说明']):
@@ -333,7 +341,7 @@ class MessageHandler:
 
             # 标记完成
             if self.database.complete_todo(todo_id):
-                self._sync_spreadsheet(chat_id)
+                self._update_todo_status_in_spreadsheet(chat_id, todo_id, "已完成")
                 reply = f"✅ 任务 {todo_id} 已完成\n\n{todo.content}"
                 self.feishu_client.send_text_message(chat_id, reply)
             else:
@@ -379,7 +387,7 @@ class MessageHandler:
 
             # 删除待办
             if self.database.delete_todo(todo_id):
-                self._sync_spreadsheet(chat_id)
+                self._update_todo_status_in_spreadsheet(chat_id, todo_id, "已删除")
                 reply = f"✅ 任务 {todo_id} 已删除"
                 self.feishu_client.send_text_message(chat_id, reply)
             else:
@@ -425,7 +433,7 @@ class MessageHandler:
             logger.error(f"Error handling set reminder command: {e}", exc_info=True)
             return False
 
-    def handle_table_command(self, chat_id: str) -> bool:
+    def handle_table_command(self, chat_id: str, user_id: str = None) -> bool:
         """处理生成表格命令"""
         try:
             config = self.database.get_reminder_config(chat_id)
@@ -445,7 +453,7 @@ class MessageHandler:
             else:
                 # 没有表格或绑定已被清除：创建新表格
                 todos = self.database.get_todos_by_chat(chat_id, include_completed=False)
-                result = self.feishu_client.create_todo_spreadsheet(chat_id, todos)
+                result = self.feishu_client.create_todo_spreadsheet(chat_id, todos, user_id=user_id)
 
                 if result:
                     sheet_url, sheet_token, sheet_id = result
@@ -505,6 +513,36 @@ class MessageHandler:
         except Exception as e:
             logger.error(f"Error handling help command: {e}", exc_info=True)
             return False
+
+    def _append_todo_to_spreadsheet(self, chat_id: str, todo_id: int, todo) -> None:
+        """追加单条新待办到表格末尾"""
+        try:
+            config = self.database.get_reminder_config(chat_id)
+            if not config.spreadsheet_token or not config.spreadsheet_sheet_id:
+                return
+            if config.spreadsheet_sheet_id == "Sheet1":
+                self.database.save_spreadsheet_info(chat_id, None, None, None)
+                return
+            self.feishu_client.append_todo_row(
+                config.spreadsheet_token, config.spreadsheet_sheet_id, todo, todo_id
+            )
+        except Exception as e:
+            logger.error(f"Error appending todo to spreadsheet: {e}", exc_info=True)
+
+    def _update_todo_status_in_spreadsheet(self, chat_id: str, todo_id: int, status: str) -> None:
+        """更新表格中指定任务的状态列"""
+        try:
+            config = self.database.get_reminder_config(chat_id)
+            if not config.spreadsheet_token or not config.spreadsheet_sheet_id:
+                return
+            if config.spreadsheet_sheet_id == "Sheet1":
+                self.database.save_spreadsheet_info(chat_id, None, None, None)
+                return
+            self.feishu_client.update_todo_status_row(
+                config.spreadsheet_token, config.spreadsheet_sheet_id, todo_id, status
+            )
+        except Exception as e:
+            logger.error(f"Error updating todo status in spreadsheet: {e}", exc_info=True)
 
     def _sync_spreadsheet(self, chat_id: str):
         """
