@@ -21,6 +21,7 @@ class Settings:
         self.FEISHU_APP_SECRET = os.getenv('FEISHU_APP_SECRET', '')
         self.FEISHU_VERIFICATION_TOKEN = os.getenv('FEISHU_VERIFICATION_TOKEN', '')
         self.FEISHU_ENCRYPT_KEY = os.getenv('FEISHU_ENCRYPT_KEY', '')
+        self.FEISHU_FOLDER_TOKEN = os.getenv('FEISHU_FOLDER_TOKEN', '')
 
         # Flask配置
         self.FLASK_HOST = os.getenv('FLASK_HOST', '0.0.0.0')

@@ -14,9 +14,10 @@ logger = logging.getLogger(__name__)
 class FeishuClient:
     """飞书客户端"""
 
-    def __init__(self, app_id: str, app_secret: str):
+    def __init__(self, app_id: str, app_secret: str, folder_token: str = ''):
         self.app_id = app_id
         self.app_secret = app_secret
+        self.folder_token = folder_token
         self.client = lark.Client.builder() \
             .app_id(app_id) \
             .app_secret(app_secret) \
@@ -246,10 +247,13 @@ class FeishuClient:
 
             # 1. 创建电子表格
             title = f"待办列表 {dt.now().strftime('%Y-%m-%d %H:%M')}"
+            create_body = {"title": title}
+            if self.folder_token:
+                create_body["folder_token"] = self.folder_token
             create_resp = requests.post(
                 "https://open.feishu.cn/open-apis/sheets/v3/spreadsheets",
                 headers=headers,
-                json={"title": title}
+                json=create_body
             )
             try:
                 create_data = create_resp.json()

@@ -32,7 +32,8 @@ logger.info(f"Database initialized: {settings.get_database_url()}")
 # 飞书客户端
 feishu_client = FeishuClient(
     app_id=settings.FEISHU_APP_ID,
-    app_secret=settings.FEISHU_APP_SECRET
+    app_secret=settings.FEISHU_APP_SECRET,
+    folder_token=settings.FEISHU_FOLDER_TOKEN
 )
 logger.info("Feishu client initialized")
 
