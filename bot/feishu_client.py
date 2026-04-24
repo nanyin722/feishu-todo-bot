@@ -289,49 +289,22 @@ class FeishuClient:
             # 3. 写入表头 + 数据
             self._write_spreadsheet_data(spreadsheet_token, sheet_id, todos, headers)
 
-            # 4. 给群组设置可编辑权限，给发起者设置管理权限
+            # 4. 设置租户内任何人通过链接可编辑
             try:
-                resp = requests.post(
+                resp = requests.patch(
                     f"https://open.feishu.cn/open-apis/drive/v1/permissions"
-                    f"/{spreadsheet_token}/members",
+                    f"/{spreadsheet_token}/public",
                     params={"type": "sheet"},
                     headers=headers,
-                    json={
-                        "member_type": "openchat",
-                        "member_id": chat_id,
-                        "perm": "edit",
-                        "notify_lark": False
-                    }
+                    json={"link_share_entity": "tenant_editable"}
                 )
                 data = resp.json()
                 if data.get("code") != 0:
-                    logger.warning(f"Chat permission failed: code={data.get('code')} msg={data.get('msg')} detail={data}")
+                    logger.warning(f"Public permission failed: code={data.get('code')} msg={data.get('msg')}")
                 else:
-                    logger.info(f"Set edit permission for chat {chat_id}")
+                    logger.info(f"Set tenant_editable for spreadsheet {spreadsheet_token}")
             except Exception as e:
-                logger.warning(f"Error setting chat permission: {e}")
-
-            if user_id:
-                try:
-                    resp = requests.post(
-                        f"https://open.feishu.cn/open-apis/drive/v1/permissions"
-                        f"/{spreadsheet_token}/members",
-                        params={"type": "sheet"},
-                        headers=headers,
-                        json={
-                            "member_type": "openid",
-                            "member_id": user_id,
-                            "perm": "full_access",
-                            "notify_lark": False
-                        }
-                    )
-                    data = resp.json()
-                    if data.get("code") != 0:
-                        logger.warning(f"User permission failed: code={data.get('code')} msg={data.get('msg')} detail={data}")
-                    else:
-                        logger.info(f"Set full_access permission for user {user_id}")
-                except Exception as e:
-                    logger.warning(f"Error setting user permission: {e}")
+                logger.warning(f"Error setting public permission: {e}")
 
             return (spreadsheet_url, spreadsheet_token, sheet_id)
 
