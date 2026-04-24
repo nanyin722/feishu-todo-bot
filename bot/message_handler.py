@@ -448,7 +448,9 @@ class MessageHandler:
                 reply = (
                     f"📊 待办表格（已同步最新数据）\n\n"
                     f"🔗 {config.spreadsheet_url}\n\n"
-                    f"字段：任务ID / 内容 / 负责人 / 创建时间 / 截止时间 / 状态 / 备注"
+                    f"字段：任务ID / 内容 / 负责人 / 创建时间 / 截止时间 / 状态 / 备注\n\n"
+                    f"⚠️ 如无编辑权限，请手动开启：\n"
+                    f"打开表格 → 右上角「···」→「分享」→「邀请协作者」→ 搜索群成员添加（可编辑）"
                 )
             else:
                 # 没有表格或绑定已被清除：创建新表格
@@ -459,9 +461,12 @@ class MessageHandler:
                     sheet_url, sheet_token, sheet_id = result
                     self.database.save_spreadsheet_info(chat_id, sheet_token, sheet_url, sheet_id)
                     reply = (
-                        f"📊 待办表格已生成，可手动修改\n\n"
+                        f"📊 待办表格已生成\n\n"
                         f"🔗 {sheet_url}\n\n"
-                        f"字段：任务ID / 内容 / 负责人 / 创建时间 / 截止时间 / 状态 / 备注"
+                        f"字段：任务ID / 内容 / 负责人 / 创建时间 / 截止时间 / 状态 / 备注\n\n"
+                        f"⚠️ 首次使用需手动开启编辑权限：\n"
+                        f"打开表格 → 右上角「···」→「分享」→「邀请协作者」→ 搜索群成员添加（可编辑）\n"
+                        f"只需操作一次，之后自动同步无需重复"
                     )
                 else:
                     reply = "❌ 生成表格失败，请检查机器人是否有云文档权限"

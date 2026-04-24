@@ -289,22 +289,8 @@ class FeishuClient:
             # 3. 写入表头 + 数据
             self._write_spreadsheet_data(spreadsheet_token, sheet_id, todos, headers)
 
-            # 4. 设置租户内任何人通过链接可编辑
-            try:
-                resp = requests.patch(
-                    f"https://open.feishu.cn/open-apis/drive/v1/permissions"
-                    f"/{spreadsheet_token}/public",
-                    params={"type": "sheet"},
-                    headers=headers,
-                    json={"link_share_entity": "tenant_editable"}
-                )
-                data = resp.json()
-                if data.get("code") != 0:
-                    logger.warning(f"Public permission failed: code={data.get('code')} msg={data.get('msg')}")
-                else:
-                    logger.info(f"Set tenant_editable for spreadsheet {spreadsheet_token}")
-            except Exception as e:
-                logger.warning(f"Error setting public permission: {e}")
+            # 4. 权限设置（飞书限制，跳过 API 调用，由用户手动分享）
+            logger.info(f"Spreadsheet created: {spreadsheet_token}, manual sharing required")
 
             return (spreadsheet_url, spreadsheet_token, sheet_id)
 
