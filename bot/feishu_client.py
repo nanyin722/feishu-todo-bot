@@ -289,9 +289,10 @@ class FeishuClient:
             # 3. 写入表头 + 数据
             self._write_spreadsheet_data(spreadsheet_token, sheet_id, todos, headers)
 
-            # 4. 设置群组可编辑权限
+            # 4. 给群组设置可编辑权限，给发起者设置管理权限
             try:
-                perm_resp = requests.post(
+                # 群组成员可编辑
+                requests.post(
                     f"https://open.feishu.cn/open-apis/drive/v1/permissions"
                     f"/{spreadsheet_token}/members",
                     params={"type": "sheet"},
@@ -299,21 +300,18 @@ class FeishuClient:
                     json={
                         "member_type": "openchat",
                         "member_id": chat_id,
-                        "perm": "edit"
+                        "perm": "edit",
+                        "notify_lark": False
                     }
                 )
-                perm_data = perm_resp.json()
-                if perm_data.get("code") != 0:
-                    logger.warning(f"Failed to set spreadsheet permission: {perm_data}")
-                else:
-                    logger.info(f"Set edit permission for chat {chat_id}")
+                logger.info(f"Set edit permission for chat {chat_id}")
             except Exception as e:
-                logger.warning(f"Error setting spreadsheet permission: {e}")
+                logger.warning(f"Error setting chat permission: {e}")
 
-            # 5. 给发起者设置管理权限
             if user_id:
                 try:
-                    user_perm_resp = requests.post(
+                    # 发起者拥有管理权限
+                    requests.post(
                         f"https://open.feishu.cn/open-apis/drive/v1/permissions"
                         f"/{spreadsheet_token}/members",
                         params={"type": "sheet"},
@@ -321,14 +319,11 @@ class FeishuClient:
                         json={
                             "member_type": "openid",
                             "member_id": user_id,
-                            "perm": "full_access"
+                            "perm": "full_access",
+                            "notify_lark": False
                         }
                     )
-                    user_perm_data = user_perm_resp.json()
-                    if user_perm_data.get("code") != 0:
-                        logger.warning(f"Failed to set user permission: {user_perm_data}")
-                    else:
-                        logger.info(f"Set full_access permission for user {user_id}")
+                    logger.info(f"Set full_access permission for user {user_id}")
                 except Exception as e:
                     logger.warning(f"Error setting user permission: {e}")
 
