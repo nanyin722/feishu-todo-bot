@@ -291,8 +291,7 @@ class FeishuClient:
 
             # 4. 给群组设置可编辑权限，给发起者设置管理权限
             try:
-                # 群组成员可编辑
-                requests.post(
+                resp = requests.post(
                     f"https://open.feishu.cn/open-apis/drive/v1/permissions"
                     f"/{spreadsheet_token}/members",
                     params={"type": "sheet"},
@@ -304,14 +303,17 @@ class FeishuClient:
                         "notify_lark": False
                     }
                 )
-                logger.info(f"Set edit permission for chat {chat_id}")
+                data = resp.json()
+                if data.get("code") != 0:
+                    logger.warning(f"Chat permission failed: code={data.get('code')} msg={data.get('msg')} detail={data}")
+                else:
+                    logger.info(f"Set edit permission for chat {chat_id}")
             except Exception as e:
                 logger.warning(f"Error setting chat permission: {e}")
 
             if user_id:
                 try:
-                    # 发起者拥有管理权限
-                    requests.post(
+                    resp = requests.post(
                         f"https://open.feishu.cn/open-apis/drive/v1/permissions"
                         f"/{spreadsheet_token}/members",
                         params={"type": "sheet"},
@@ -323,7 +325,11 @@ class FeishuClient:
                             "notify_lark": False
                         }
                     )
-                    logger.info(f"Set full_access permission for user {user_id}")
+                    data = resp.json()
+                    if data.get("code") != 0:
+                        logger.warning(f"User permission failed: code={data.get('code')} msg={data.get('msg')} detail={data}")
+                    else:
+                        logger.info(f"Set full_access permission for user {user_id}")
                 except Exception as e:
                     logger.warning(f"Error setting user permission: {e}")
 
