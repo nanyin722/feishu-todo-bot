@@ -160,6 +160,7 @@ class MessageHandler:
             # 保存到数据库
             todo_id = self.database.add_todo(todo)
             todo.id = todo_id
+            todo.created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
             # 追加到表格末尾（不覆盖已有数据）
             self._append_todo_to_spreadsheet(chat_id, todo_id, todo)

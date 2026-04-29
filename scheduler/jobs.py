@@ -10,13 +10,15 @@ from .reminder import ReminderService
 
 logger = logging.getLogger(__name__)
 
+CST = 'Asia/Shanghai'
+
 
 class SchedulerManager:
     """调度器管理器"""
 
     def __init__(self, reminder_service: ReminderService):
         self.reminder_service = reminder_service
-        self.scheduler = BackgroundScheduler()
+        self.scheduler = BackgroundScheduler(timezone=CST)
 
     def start(self):
         """启动调度器"""
@@ -31,25 +33,15 @@ class SchedulerManager:
             )
             logger.info("Added weekly reminder job: Hourly check with per-chat config")
 
-            # 添加每日截止日提醒任务（每天早上9点）
+            # 截止日提醒：每天上午10点（北京时间）
             self.scheduler.add_job(
                 func=self.reminder_service.send_daily_deadline_reminder,
-                trigger=CronTrigger(hour=9, minute=0),
+                trigger=CronTrigger(hour=10, minute=0, timezone=CST),
                 id='daily_deadline_reminder',
-                name='每日截止提醒',
+                name='每日截止提醒（北京时间10:00）',
                 replace_existing=True
             )
-            logger.info("Added daily deadline reminder job: Every day at 09:00")
-
-            # 添加额外的检查任务（每小时检查一次，防止遗漏）
-            self.scheduler.add_job(
-                func=self.reminder_service.send_daily_deadline_reminder,
-                trigger=IntervalTrigger(hours=1),
-                id='hourly_deadline_check',
-                name='每小时截止检查',
-                replace_existing=True
-            )
-            logger.info("Added hourly deadline check job: Every 1 hour")
+            logger.info("Added daily deadline reminder job: Every day at 10:00 CST")
 
             # 启动调度器
             self.scheduler.start()

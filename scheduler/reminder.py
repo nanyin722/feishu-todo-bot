@@ -4,6 +4,12 @@
 import logging
 from datetime import datetime, date
 from typing import List
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
+
+_CST = ZoneInfo('Asia/Shanghai')
 
 from bot.feishu_client import FeishuClient
 from database.db import Database
@@ -66,7 +72,7 @@ class ReminderService:
         try:
             logger.info("Starting weekly reminder check")
 
-            now = datetime.now()
+            now = datetime.now(_CST)
             current_weekday = now.isoweekday()  # 1=周一 ... 7=周日
             current_hour = now.hour
             current_minute = now.minute
