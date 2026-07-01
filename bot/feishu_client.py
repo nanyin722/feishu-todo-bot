@@ -430,6 +430,80 @@ class FeishuClient:
             logger.error(f"Error appending todo row: {e}", exc_info=True)
             return False
 
+    def update_todo_content_row(self, spreadsheet_token: str, sheet_id: str,
+                                todo_id: int, new_content: str) -> bool:
+        """更新表格中指定任务的内容列（B列）"""
+        return self._update_todo_column(spreadsheet_token, sheet_id, todo_id, 'B', new_content)
+
+    def update_todo_deadline_row(self, spreadsheet_token: str, sheet_id: str,
+                                 todo_id: int, new_deadline: str) -> bool:
+        """更新表格中指定任务的截止时间列（E列）"""
+        return self._update_todo_column(spreadsheet_token, sheet_id, todo_id, 'E', new_deadline)
+
+    def _update_todo_column(self, spreadsheet_token: str, sheet_id: str,
+                            todo_id: int, column: str, value: str) -> bool:
+        """更新表格中指定任务的某一列"""
+        try:
+            import requests
+
+            token = self._get_tenant_access_token()
+            if not token:
+                return False
+
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json; charset=utf-8"
+            }
+
+            # 读取A列找到对应行号
+            read_range = f"{sheet_id}!A1:A2000"
+            read_resp = requests.get(
+                f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets"
+                f"/{spreadsheet_token}/values/{read_range}",
+                headers=headers
+            )
+            rows = read_resp.json().get("data", {}).get("valueRange", {}).get("values", []) or []
+
+            target_row = None
+            for i, row in enumerate(rows):
+                if i == 0:
+                    continue  # 跳过表头
+                if row and row[0]:
+                    try:
+                        if int(str(row[0])) == todo_id:
+                            target_row = i + 1
+                            break
+                    except (ValueError, TypeError):
+                        pass
+
+            if not target_row:
+                logger.warning(f"Todo {todo_id} not found in spreadsheet, skipping column update")
+                return False
+
+            range_str = f"{sheet_id}!{column}{target_row}"
+            write_resp = requests.put(
+                f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets"
+                f"/{spreadsheet_token}/values",
+                headers=headers,
+                json={"valueRange": {"range": range_str, "values": [[value]]}}
+            )
+            try:
+                write_data = write_resp.json()
+            except Exception as e:
+                logger.error(f"Failed to parse column update response: {e}")
+                return False
+
+            if write_data.get("code") != 0:
+                logger.error(f"Failed to update column {column} for todo {todo_id}: {write_data}")
+                return False
+
+            logger.info(f"Updated todo {todo_id} column {column} at row {target_row}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error updating todo column: {e}", exc_info=True)
+            return False
+
     def update_todo_status_row(self, spreadsheet_token: str, sheet_id: str,
                                todo_id: int, status: str) -> bool:
         """更新表格中指定任务的状态列（F列）"""

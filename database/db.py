@@ -175,6 +175,66 @@ class Database:
                 logger.info(f"Completed todo {todo_id}")
             return success
 
+    def update_todo_content(self, todo_id: int, new_content: str) -> bool:
+        """更新待办内容"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE todos SET content = ? WHERE id = ?", (new_content, todo_id))
+            success = cursor.rowcount > 0
+            if success:
+                logger.info(f"Updated todo {todo_id} content")
+            return success
+
+    def update_todo_deadline(self, todo_id: int, new_deadline: str) -> bool:
+        """更新待办截止时间"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE todos SET deadline = ?, reminded_daily = 0 WHERE id = ?",
+                           (new_deadline, todo_id))
+            success = cursor.rowcount > 0
+            if success:
+                logger.info(f"Updated todo {todo_id} deadline to {new_deadline}")
+            return success
+
+    def get_todo_stats(self, chat_id: str) -> dict:
+        """获取群组待办统计信息"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            today = date.today().strftime('%Y-%m-%d')
+
+            cursor.execute("SELECT COUNT(*) as cnt FROM todos WHERE chat_id = ?", (chat_id,))
+            total = cursor.fetchone()['cnt']
+
+            cursor.execute("SELECT COUNT(*) as cnt FROM todos WHERE chat_id = ? AND completed = 1",
+                           (chat_id,))
+            completed = cursor.fetchone()['cnt']
+
+            cursor.execute("""SELECT COUNT(*) as cnt FROM todos
+                WHERE chat_id = ? AND completed = 0
+                AND deadline IS NOT NULL AND deadline != ''
+                AND date(deadline) < ?""", (chat_id, today))
+            overdue = cursor.fetchone()['cnt']
+
+            cursor.execute("""SELECT COUNT(*) as cnt FROM todos
+                WHERE chat_id = ? AND completed = 0
+                AND date(deadline) = ?""", (chat_id, today))
+            due_today = cursor.fetchone()['cnt']
+
+            cursor.execute("""SELECT user_name, COUNT(*) as total,
+                SUM(CASE WHEN completed = 1 THEN 1 ELSE 0 END) as done
+                FROM todos WHERE chat_id = ?
+                GROUP BY user_id, user_name ORDER BY total DESC LIMIT 5""", (chat_id,))
+            creators = [dict(r) for r in cursor.fetchall()]
+
+            return {
+                'total': total,
+                'completed': completed,
+                'active': total - completed,
+                'overdue': overdue,
+                'due_today': due_today,
+                'creators': creators,
+            }
+
     def delete_todo(self, todo_id: int) -> bool:
         """删除待办"""
         with self.get_connection() as conn:

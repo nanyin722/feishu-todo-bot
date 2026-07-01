@@ -82,9 +82,10 @@ class ReminderService:
             sent_count = 0
             for chat_id in chat_ids:
                 config = self.database.get_reminder_config(chat_id)
-                # 判断当前时间是否匹配该群配置（分钟误差在0-59分钟内均视为本小时应发送）
+                # 精确匹配日期、小时，分钟误差在 ±15 分钟以内即触发
                 if (config.weekly_day == current_weekday
-                        and config.weekly_hour == current_hour):
+                        and config.weekly_hour == current_hour
+                        and abs(current_minute - config.weekly_minute) <= 15):
                     self._send_weekly_reminder_for_chat(chat_id)
                     sent_count += 1
 

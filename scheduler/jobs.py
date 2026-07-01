@@ -23,15 +23,15 @@ class SchedulerManager:
     def start(self):
         """启动调度器"""
         try:
-            # 每周提醒：每小时触发一次，send_weekly_reminder 内部按各群配置判断是否发送
+            # 每周提醒：每30分钟触发一次，send_weekly_reminder 内部按各群配置精确匹配时间（±15分钟误差）
             self.scheduler.add_job(
                 func=self.reminder_service.send_weekly_reminder,
-                trigger=IntervalTrigger(hours=1),
+                trigger=IntervalTrigger(minutes=30),
                 id='weekly_reminder',
                 name='每周待办提醒（按各群配置时间）',
                 replace_existing=True
             )
-            logger.info("Added weekly reminder job: Hourly check with per-chat config")
+            logger.info("Added weekly reminder job: Every 30 minutes with per-chat config (±15min window)")
 
             # 截止日提醒：每天上午10点（北京时间）
             self.scheduler.add_job(

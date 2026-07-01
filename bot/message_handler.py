@@ -85,8 +85,10 @@ class MessageHandler:
                 COMMAND_PATTERNS = [
                     r'查看待办', r'待办列表', r'^查看$', r'^列表$',
                     r'完成\s*\d+', r'删除\s*\d+',
+                    r'编辑\s*\d+', r'截止\s*\d+',
                     r'设置提醒', r'帮助', r'help', r'使用说明',
                     r'生成表格', r'导出表格', r'^表格$',
+                    r'^统计$', r'查看统计',
                 ]
                 is_command = (not clean) or any(re.search(p, clean) for p in COMMAND_PATTERNS)
 
@@ -221,6 +223,14 @@ class MessageHandler:
             if '删除' in clean_text:
                 return self.handle_delete_command(chat_id, user_id, clean_text)
 
+            # 编辑待办内容
+            if re.search(r'编辑\s*\d+', clean_text):
+                return self.handle_edit_command(chat_id, user_id, clean_text)
+
+            # 修改截止时间
+            if re.search(r'截止\s*\d+', clean_text):
+                return self.handle_deadline_command(chat_id, user_id, clean_text)
+
             # 设置提醒
             if '设置提醒' in clean_text:
                 return self.handle_set_reminder_command(chat_id, clean_text)
@@ -228,6 +238,10 @@ class MessageHandler:
             # 生成表格
             if self.command_parser.is_command(clean_text, ['生成表格', '导出表格', '表格']):
                 return self.handle_table_command(chat_id, user_id)
+
+            # 统计
+            if self.command_parser.is_command(clean_text, ['统计', '查看统计']):
+                return self.handle_stats_command(chat_id)
 
             # 帮助
             if self.command_parser.is_command(clean_text, ['帮助', 'help', '使用说明']):
@@ -319,7 +333,7 @@ class MessageHandler:
         """处理完成待办命令"""
         try:
             # 提取任务ID
-            match = re.search(r'完成\s+(\d+)', text)
+            match = re.search(r'完成\s*(\d+)', text)
             if not match:
                 reply = "❌ 请指定任务ID，格式：@机器人 完成 <任务ID>"
                 self.feishu_client.send_text_message(chat_id, reply)
@@ -359,7 +373,7 @@ class MessageHandler:
         """处理删除待办命令"""
         try:
             # 提取任务ID
-            match = re.search(r'删除\s+(\d+)', text)
+            match = re.search(r'删除\s*(\d+)', text)
             if not match:
                 reply = "❌ 请指定任务ID，格式：@机器人 删除 <任务ID>"
                 self.feishu_client.send_text_message(chat_id, reply)
@@ -399,6 +413,127 @@ class MessageHandler:
 
         except Exception as e:
             logger.error(f"Error handling delete command: {e}", exc_info=True)
+            return False
+
+    def handle_edit_command(self, chat_id: str, user_id: str, text: str) -> bool:
+        """处理编辑待办内容命令：@机器人 编辑 <ID> 新内容"""
+        try:
+            match = re.search(r'编辑\s*(\d+)\s+(.+)', text)
+            if not match:
+                reply = "❌ 请指定任务ID和新内容，格式：@机器人 编辑 <任务ID> 新内容"
+                self.feishu_client.send_text_message(chat_id, reply)
+                return True
+
+            todo_id = int(match.group(1))
+            new_content = match.group(2).strip()
+
+            todo = self.database.get_todo_by_id(todo_id)
+            if not todo:
+                self.feishu_client.send_text_message(chat_id, f"❌ 任务 {todo_id} 不存在")
+                return True
+            if todo.chat_id != chat_id:
+                self.feishu_client.send_text_message(chat_id, f"❌ 任务 {todo_id} 不在当前群组")
+                return True
+            if todo.user_id != user_id:
+                self.feishu_client.send_text_message(chat_id, "❌ 只有创建者可以编辑任务")
+                return True
+
+            if self.database.update_todo_content(todo_id, new_content):
+                self._update_todo_content_in_spreadsheet(chat_id, todo_id, new_content)
+                reply = f"✅ 任务 {todo_id} 内容已更新\n\n新内容：{new_content}"
+                self.feishu_client.send_text_message(chat_id, reply)
+            else:
+                self.feishu_client.send_text_message(chat_id, f"❌ 编辑任务 {todo_id} 失败")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Error handling edit command: {e}", exc_info=True)
+            return False
+
+    def handle_deadline_command(self, chat_id: str, user_id: str, text: str) -> bool:
+        """处理修改截止时间命令：@机器人 截止 <ID> 新日期"""
+        try:
+            match = re.search(r'截止\s*(\d+)\s+(.+)', text)
+            if not match:
+                reply = "❌ 请指定任务ID和新截止时间，格式：@机器人 截止 <任务ID> 新日期\n示例：@机器人 截止 5 下周五"
+                self.feishu_client.send_text_message(chat_id, reply)
+                return True
+
+            todo_id = int(match.group(1))
+            date_text = match.group(2).strip()
+
+            todo = self.database.get_todo_by_id(todo_id)
+            if not todo:
+                self.feishu_client.send_text_message(chat_id, f"❌ 任务 {todo_id} 不存在")
+                return True
+            if todo.chat_id != chat_id:
+                self.feishu_client.send_text_message(chat_id, f"❌ 任务 {todo_id} 不在当前群组")
+                return True
+            if todo.user_id != user_id:
+                self.feishu_client.send_text_message(chat_id, "❌ 只有创建者可以修改截止时间")
+                return True
+
+            from .todo_parser import NaturalDateParser
+            new_deadline = NaturalDateParser.parse(date_text)
+            if not new_deadline:
+                self.feishu_client.send_text_message(chat_id, f"❌ 无法识别日期：{date_text}\n支持格式：明天、下周五、3月25日、2026-06-30 等")
+                return True
+
+            if self.database.update_todo_deadline(todo_id, new_deadline):
+                self._update_todo_deadline_in_spreadsheet(chat_id, todo_id, new_deadline)
+                reply = f"✅ 任务 {todo_id} 截止时间已更新\n\n新截止时间：{new_deadline}"
+                self.feishu_client.send_text_message(chat_id, reply)
+            else:
+                self.feishu_client.send_text_message(chat_id, f"❌ 修改任务 {todo_id} 截止时间失败")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Error handling deadline command: {e}", exc_info=True)
+            return False
+
+    def handle_stats_command(self, chat_id: str) -> bool:
+        """处理统计命令"""
+        try:
+            stats = self.database.get_todo_stats(chat_id)
+
+            total = stats['total']
+            if total == 0:
+                self.feishu_client.send_text_message(chat_id, "📊 本群暂无待办记录")
+                return True
+
+            completed = stats['completed']
+            active = stats['active']
+            overdue = stats['overdue']
+            due_today = stats['due_today']
+            rate = int(completed / total * 100) if total > 0 else 0
+
+            lines = [
+                "📊 待办统计\n",
+                f"累计创建：{total} 个任务",
+                f"✅ 已完成：{completed} 个（完成率 {rate}%）",
+                f"📋 未完成：{active} 个",
+            ]
+            if overdue:
+                lines.append(f"🔴 已逾期：{overdue} 个")
+            if due_today:
+                lines.append(f"🟠 今日到期：{due_today} 个")
+
+            creators = stats.get('creators', [])
+            if creators:
+                lines.append("\n👤 创建者排行（Top 5）：")
+                for c in creators:
+                    name = c.get('user_name') or '未知'
+                    ctotal = c.get('total', 0)
+                    cdone = c.get('done', 0)
+                    lines.append(f"  • {name}：{ctotal} 个（已完成 {cdone} 个）")
+
+            self.feishu_client.send_text_message(chat_id, "\n".join(lines))
+            return True
+
+        except Exception as e:
+            logger.error(f"Error handling stats command: {e}", exc_info=True)
             return False
 
     def handle_set_reminder_command(self, chat_id: str, text: str) -> bool:
@@ -500,6 +635,16 @@ class MessageHandler:
 ❌ 删除待办：
 @机器人 删除 <任务ID>（仅创建者可删除）
 
+✏️ 编辑待办内容：
+@机器人 编辑 <任务ID> 新内容（仅创建者可编辑）
+
+📅 修改截止时间：
+@机器人 截止 <任务ID> 新日期
+示例：@机器人 截止 5 下周五
+
+📊 查看统计：
+@机器人 统计
+
 ⏰ 设置提醒时间：
 @机器人 设置提醒 周<X> HH:MM
 示例：@机器人 设置提醒 周一 09:00
@@ -519,6 +664,36 @@ class MessageHandler:
         except Exception as e:
             logger.error(f"Error handling help command: {e}", exc_info=True)
             return False
+
+    def _update_todo_content_in_spreadsheet(self, chat_id: str, todo_id: int, new_content: str) -> None:
+        """更新表格中指定任务的内容列（B列）"""
+        try:
+            config = self.database.get_reminder_config(chat_id)
+            if not config.spreadsheet_token or not config.spreadsheet_sheet_id:
+                return
+            if config.spreadsheet_sheet_id == "Sheet1":
+                self.database.save_spreadsheet_info(chat_id, None, None, None)
+                return
+            self.feishu_client.update_todo_content_row(
+                config.spreadsheet_token, config.spreadsheet_sheet_id, todo_id, new_content
+            )
+        except Exception as e:
+            logger.error(f"Error updating todo content in spreadsheet: {e}", exc_info=True)
+
+    def _update_todo_deadline_in_spreadsheet(self, chat_id: str, todo_id: int, new_deadline: str) -> None:
+        """更新表格中指定任务的截止时间列（E列）"""
+        try:
+            config = self.database.get_reminder_config(chat_id)
+            if not config.spreadsheet_token or not config.spreadsheet_sheet_id:
+                return
+            if config.spreadsheet_sheet_id == "Sheet1":
+                self.database.save_spreadsheet_info(chat_id, None, None, None)
+                return
+            self.feishu_client.update_todo_deadline_row(
+                config.spreadsheet_token, config.spreadsheet_sheet_id, todo_id, new_deadline
+            )
+        except Exception as e:
+            logger.error(f"Error updating todo deadline in spreadsheet: {e}", exc_info=True)
 
     def _append_todo_to_spreadsheet(self, chat_id: str, todo_id: int, todo) -> None:
         """追加单条新待办到表格末尾"""
