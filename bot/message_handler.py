@@ -25,6 +25,40 @@ class MessageHandler:
         self.command_parser = CommandParser()
         self.config_parser = ReminderConfigParser()
 
+    def _extract_text(self, msg_type: str, content_obj: dict) -> str:
+        """
+        从不同类型的飞书消息中提取纯文字内容
+
+        - text: {"text": "..."}
+        - post: {"zh_cn": {"title": "...", "content": [[{"tag":"text","text":"..."},{"tag":"img",...}]]}}
+        - image/file/sticker 等：无文字，返回空字符串
+        """
+        if msg_type == 'text':
+            return content_obj.get('text', '')
+
+        if msg_type == 'post':
+            # 取第一个语言的内容（优先 zh_cn，否则取第一个）
+            post = content_obj.get('zh_cn') or next(iter(content_obj.values()), {})
+            parts = []
+            title = post.get('title', '').strip()
+            if title:
+                parts.append(title)
+            for line in post.get('content', []):
+                for block in line:
+                    if block.get('tag') == 'text':
+                        t = block.get('text', '').strip()
+                        if t:
+                            parts.append(t)
+                    elif block.get('tag') == 'at':
+                        # @提及保留 @name 格式，与 mentions 字段保持一致
+                        name = block.get('user_name', '')
+                        if name:
+                            parts.append(f"@{name}")
+            return ' '.join(parts)
+
+        # image / file / sticker / audio / media 等，无文字
+        return ''
+
     def handle_message(self, event_data: Dict[str, Any]) -> bool:
         """
         处理接收到的消息事件
@@ -51,12 +85,18 @@ class MessageHandler:
                 return True
 
             # 解析消息内容（JSON格式）
+            msg_type = message.get('msg_type', 'text')
             try:
                 content_obj = json.loads(content)
-                text = content_obj.get('text', '')
+                text = self._extract_text(msg_type, content_obj)
             except json.JSONDecodeError:
                 logger.warning(f"Failed to parse message content: {content}")
                 return False
+
+            # 纯图片/文件等无文字消息，直接跳过
+            if not text:
+                logger.info(f"Ignoring non-text message (msg_type={msg_type})")
+                return True
 
             # 提取发送者信息
             user_id = sender.get('sender_id', {}).get('open_id', '')
