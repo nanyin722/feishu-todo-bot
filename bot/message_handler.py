@@ -85,7 +85,7 @@ class MessageHandler:
                 return True
 
             # 解析消息内容（JSON格式）
-            msg_type = message.get('msg_type', 'text')
+            msg_type = message.get('message_type', 'text')
             try:
                 content_obj = json.loads(content)
                 text = self._extract_text(msg_type, content_obj)
