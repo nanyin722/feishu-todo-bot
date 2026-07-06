@@ -52,6 +52,9 @@ logger.info("Scheduler manager created")
 # 已处理的事件ID集合（内存去重，防止飞书 webhook 重试导致重复处理）
 _processed_event_ids: deque = deque(maxlen=500)
 
+# 调试：保存最近10条收到的消息原始数据
+_recent_messages: deque = deque(maxlen=10)
+
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -107,6 +110,15 @@ def handle_event():
         if data.get('header', {}).get('event_type') == 'im.message.receive_v1':
             event_data = data.get('event', {})
 
+            # 调试：记录消息原始数据（只保留关键字段）
+            msg = event_data.get('message', {})
+            _recent_messages.append({
+                'message_type': msg.get('message_type'),
+                'chat_type': msg.get('chat_type'),
+                'content': msg.get('content'),
+                'mentions': msg.get('mentions'),
+            })
+
             # 过滤机器人自己的消息
             sender = event_data.get('sender', {})
             sender_type = sender.get('sender_type', '')
@@ -122,6 +134,12 @@ def handle_event():
     except Exception as e:
         logger.error(f"Error handling event: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/debug/messages', methods=['GET'])
+def debug_messages():
+    """查看最近收到的消息原始数据（用于调试消息格式）"""
+    return jsonify({'messages': list(_recent_messages)})
 
 
 @app.route('/api/todos', methods=['GET'])
