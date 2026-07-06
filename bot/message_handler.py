@@ -27,37 +27,49 @@ class MessageHandler:
 
     def _extract_text(self, msg_type: str, content_obj: dict) -> str:
         """
-        从不同类型的飞书消息中提取纯文字内容
+        从不同类型的飞书消息中提取纯文字内容。
+        优先根据内容结构判断，msg_type 仅作辅助，避免字段名不一致导致解析失败。
 
-        - text: {"text": "..."}
-        - post: {"zh_cn": {"title": "...", "content": [[{"tag":"text","text":"..."},{"tag":"img",...}]]}}
-        - image/file/sticker 等：无文字，返回空字符串
+        - text 结构: {"text": "..."}
+        - post 结构: {"zh_cn": {"title": "...", "content": [[{"tag":"text",...},{"tag":"img",...}]]}}
+        - image/file/sticker 等: 无文字，返回空字符串
         """
-        if msg_type == 'text':
-            return content_obj.get('text', '')
+        # 1. 内容里有顶层 text 字段 → text 类型消息
+        if 'text' in content_obj:
+            return content_obj['text']
 
-        if msg_type == 'post':
-            # 取第一个语言的内容（优先 zh_cn，否则取第一个）
-            post = content_obj.get('zh_cn') or next(iter(content_obj.values()), {})
+        # 2. 内容里有语言 key（zh_cn / en_us 等）→ post 富文本消息，提取文字块
+        post = None
+        for lang in ('zh_cn', 'en_us', 'ja_jp'):
+            if lang in content_obj:
+                post = content_obj[lang]
+                break
+        # 如果没找到已知语言 key，但 msg_type 是 post，取第一个 value 尝试解析
+        if post is None and msg_type == 'post' and content_obj:
+            post = next(iter(content_obj.values()), None)
+
+        if post and isinstance(post, dict):
             parts = []
-            title = post.get('title', '').strip()
+            title = str(post.get('title', '')).strip()
             if title:
                 parts.append(title)
             for line in post.get('content', []):
+                if not isinstance(line, list):
+                    continue
                 for block in line:
                     if block.get('tag') == 'text':
-                        t = block.get('text', '').strip()
+                        t = str(block.get('text', '')).strip()
                         if t:
                             parts.append(t)
                     elif block.get('tag') == 'at':
-                        # @提及保留 @name 格式，与 mentions 字段保持一致
                         name = block.get('user_name', '')
                         if name:
                             parts.append(f"@{name}")
             return ' '.join(parts)
 
-        # image / file / sticker / audio / media 等，无文字
+        # 3. image / file / sticker / audio / media 等纯媒体消息，无文字
         return ''
+
 
     def handle_message(self, event_data: Dict[str, Any]) -> bool:
         """
