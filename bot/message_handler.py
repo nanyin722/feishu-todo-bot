@@ -40,13 +40,21 @@ class MessageHandler:
 
         # 2. 内容里有语言 key（zh_cn / en_us 等）→ post 富文本消息，提取文字块
         post = None
-        for lang in ('zh_cn', 'en_us', 'ja_jp'):
-            if lang in content_obj:
-                post = content_obj[lang]
-                break
-        # 如果没找到已知语言 key，但 msg_type 是 post，取第一个 value 尝试解析
-        if post is None and msg_type == 'post' and content_obj:
-            post = next(iter(content_obj.values()), None)
+
+        # content_obj 直接就是 post 内容（有 title + content 字段，无语言包装）
+        if 'content' in content_obj:
+            post = content_obj
+        else:
+            # 有语言包装：{"zh_cn": {"title":..., "content":...}}
+            for lang in ('zh_cn', 'en_us', 'ja_jp'):
+                if lang in content_obj:
+                    post = content_obj[lang]
+                    break
+            # 兜底：取第一个 dict 类型的 value
+            if post is None and msg_type == 'post':
+                first_val = next(iter(content_obj.values()), None)
+                if isinstance(first_val, dict):
+                    post = first_val
 
         if post and isinstance(post, dict):
             parts = []
@@ -105,18 +113,9 @@ class MessageHandler:
                 logger.warning(f"Failed to parse message content: {content}")
                 return False
 
-            # 纯图片/文件等无文字消息
+            # 纯图片/文件等无文字消息，直接跳过
             if not text:
-                # 已知纯媒体类型：静默跳过
-                if msg_type in ('image', 'file', 'audio', 'sticker', 'media', 'system'):
-                    logger.info(f"Ignoring media message (msg_type={msg_type})")
-                    return True
-                # 其他无法提取文字的类型：回复调试信息，帮助排查格式
-                raw = message.get('content', '')[:500]
-                self.feishu_client.send_text_message(
-                    chat_id,
-                    f"[调试] 收到消息但无法提取文字\nmsg_type: {msg_type}\ncontent: {raw}"
-                )
+                logger.info(f"Ignoring non-text message (msg_type={msg_type})")
                 return True
 
             # 提取发送者信息
