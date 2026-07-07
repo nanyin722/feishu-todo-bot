@@ -105,9 +105,18 @@ class MessageHandler:
                 logger.warning(f"Failed to parse message content: {content}")
                 return False
 
-            # 纯图片/文件等无文字消息，直接跳过
+            # 纯图片/文件等无文字消息
             if not text:
-                logger.info(f"Ignoring non-text message (msg_type={msg_type})")
+                # 已知纯媒体类型：静默跳过
+                if msg_type in ('image', 'file', 'audio', 'sticker', 'media', 'system'):
+                    logger.info(f"Ignoring media message (msg_type={msg_type})")
+                    return True
+                # 其他无法提取文字的类型：回复调试信息，帮助排查格式
+                raw = message.get('content', '')[:500]
+                self.feishu_client.send_text_message(
+                    chat_id,
+                    f"[调试] 收到消息但无法提取文字\nmsg_type: {msg_type}\ncontent: {raw}"
+                )
                 return True
 
             # 提取发送者信息
