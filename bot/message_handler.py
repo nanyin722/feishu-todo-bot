@@ -634,13 +634,22 @@ class MessageHandler:
         try:
             config = self.database.get_reminder_config(chat_id)
 
+            # 已有表格 URL → 复用，绝不重复创建
             if config.spreadsheet_url and config.spreadsheet_token:
-                # 已有表格：同步最新数据（若 sheet_id 有误会自动清除绑定）
-                self._sync_spreadsheet(chat_id)
-                # 同步后重新读取，检查绑定是否仍有效
-                config = self.database.get_reminder_config(chat_id)
+                # sheet_id 缺失或无效时，尝试从 token 自动修复
+                if not config.spreadsheet_sheet_id or config.spreadsheet_sheet_id == "Sheet1":
+                    repaired_id = self.feishu_client.get_first_sheet_id(config.spreadsheet_token)
+                    if repaired_id:
+                        self.database.save_spreadsheet_info(
+                            chat_id, config.spreadsheet_token,
+                            config.spreadsheet_url, repaired_id
+                        )
+                        config = self.database.get_reminder_config(chat_id)
+                        logger.info(f"Repaired sheet_id for chat {chat_id}: {repaired_id}")
 
-            if config.spreadsheet_url and config.spreadsheet_token and config.spreadsheet_sheet_id:
+                # 尝试同步数据（失败不影响返回 URL）
+                self._sync_spreadsheet(chat_id)
+
                 reply = (
                     f"📊 待办表格（已同步最新数据）\n\n"
                     f"🔗 {config.spreadsheet_url}\n\n"
@@ -648,24 +657,26 @@ class MessageHandler:
                     f"⚠️ 如无编辑权限，请手动开启：\n"
                     f"打开表格 → 右上角「···」→「分享」→「邀请协作者」→ 搜索群成员添加（可编辑）"
                 )
-            else:
-                # 没有表格或绑定已被清除：创建新表格
-                todos = self.database.get_todos_by_chat(chat_id, include_completed=False)
-                result = self.feishu_client.create_todo_spreadsheet(chat_id, todos, user_id=user_id)
+                self.feishu_client.send_text_message(chat_id, reply)
+                return True
 
-                if result:
-                    sheet_url, sheet_token, sheet_id = result
-                    self.database.save_spreadsheet_info(chat_id, sheet_token, sheet_url, sheet_id)
-                    reply = (
-                        f"📊 待办表格已生成\n\n"
-                        f"🔗 {sheet_url}\n\n"
-                        f"字段：任务ID / 内容 / 负责人 / 创建时间 / 截止时间 / 状态 / 备注\n\n"
-                        f"⚠️ 首次使用需手动开启编辑权限：\n"
-                        f"打开表格 → 右上角「···」→「分享」→「邀请协作者」→ 搜索群成员添加（可编辑）\n"
-                        f"只需操作一次，之后自动同步无需重复"
-                    )
-                else:
-                    reply = "❌ 生成表格失败，请检查机器人是否有云文档权限"
+            # 完全没有表格：创建新表格
+            todos = self.database.get_todos_by_chat(chat_id, include_completed=False)
+            result = self.feishu_client.create_todo_spreadsheet(chat_id, todos, user_id=user_id)
+
+            if result:
+                sheet_url, sheet_token, sheet_id = result
+                self.database.save_spreadsheet_info(chat_id, sheet_token, sheet_url, sheet_id)
+                reply = (
+                    f"📊 待办表格已生成\n\n"
+                    f"🔗 {sheet_url}\n\n"
+                    f"字段：任务ID / 内容 / 负责人 / 创建时间 / 截止时间 / 状态 / 备注\n\n"
+                    f"⚠️ 首次使用需手动开启编辑权限：\n"
+                    f"打开表格 → 右上角「···」→「分享」→「邀请协作者」→ 搜索群成员添加（可编辑）\n"
+                    f"只需操作一次，之后自动同步无需重复"
+                )
+            else:
+                reply = "❌ 生成表格失败，请检查机器人是否有云文档权限"
 
             self.feishu_client.send_text_message(chat_id, reply)
             return True
@@ -732,8 +743,7 @@ class MessageHandler:
             if not config.spreadsheet_token or not config.spreadsheet_sheet_id:
                 return
             if config.spreadsheet_sheet_id == "Sheet1":
-                self.database.save_spreadsheet_info(chat_id, None, None, None)
-                return
+                return  # sheet_id 无效，跳过，不清除绑定
             self.feishu_client.update_todo_content_row(
                 config.spreadsheet_token, config.spreadsheet_sheet_id, todo_id, new_content
             )
@@ -747,8 +757,7 @@ class MessageHandler:
             if not config.spreadsheet_token or not config.spreadsheet_sheet_id:
                 return
             if config.spreadsheet_sheet_id == "Sheet1":
-                self.database.save_spreadsheet_info(chat_id, None, None, None)
-                return
+                return  # sheet_id 无效，跳过，不清除绑定
             self.feishu_client.update_todo_deadline_row(
                 config.spreadsheet_token, config.spreadsheet_sheet_id, todo_id, new_deadline
             )
@@ -762,8 +771,7 @@ class MessageHandler:
             if not config.spreadsheet_token or not config.spreadsheet_sheet_id:
                 return
             if config.spreadsheet_sheet_id == "Sheet1":
-                self.database.save_spreadsheet_info(chat_id, None, None, None)
-                return
+                return  # sheet_id 无效，跳过，不清除绑定
             self.feishu_client.append_todo_row(
                 config.spreadsheet_token, config.spreadsheet_sheet_id, todo, todo_id
             )
@@ -777,8 +785,7 @@ class MessageHandler:
             if not config.spreadsheet_token or not config.spreadsheet_sheet_id:
                 return
             if config.spreadsheet_sheet_id == "Sheet1":
-                self.database.save_spreadsheet_info(chat_id, None, None, None)
-                return
+                return  # sheet_id 无效，跳过，不清除绑定
             self.feishu_client.update_todo_status_row(
                 config.spreadsheet_token, config.spreadsheet_sheet_id, todo_id, status
             )
@@ -786,19 +793,13 @@ class MessageHandler:
             logger.error(f"Error updating todo status in spreadsheet: {e}", exc_info=True)
 
     def _sync_spreadsheet(self, chat_id: str):
-        """
-        将当前群组的待办数据同步到飞书表格（如有关联表格则更新，否则静默跳过）
-        """
+        """将当前群组的待办数据同步到飞书表格"""
         try:
             config = self.database.get_reminder_config(chat_id)
             if not config.spreadsheet_token or not config.spreadsheet_sheet_id:
-                return  # 尚未关联表格，跳过同步
-
-            # 检测历史遗留的错误 sheet_id，自动清除绑定等待重新生成
-            if config.spreadsheet_sheet_id == "Sheet1":
-                logger.warning(f"Invalid sheet_id 'Sheet1' detected for chat {chat_id}, clearing binding")
-                self.database.save_spreadsheet_info(chat_id, None, None, None)
                 return
+            if config.spreadsheet_sheet_id == "Sheet1":
+                return  # sheet_id 无效，跳过，不清除绑定
 
             todos = self.database.get_todos_by_chat(chat_id, include_completed=False)
             self.feishu_client.update_todo_spreadsheet(

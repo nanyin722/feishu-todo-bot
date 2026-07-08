@@ -218,6 +218,28 @@ class FeishuClient:
             logger.error(f"Error getting user info: {e}")
             return None
 
+    def get_first_sheet_id(self, spreadsheet_token: str) -> Optional[str]:
+        """从已有表格 token 获取第一个工作表的 sheet_id"""
+        try:
+            import requests
+            token = self._get_tenant_access_token()
+            if not token:
+                return None
+            resp = requests.get(
+                f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets"
+                f"/{spreadsheet_token}/metainfo",
+                headers={"Authorization": f"Bearer {token}"}
+            )
+            data = resp.json()
+            if data.get("code") == 0:
+                sheets = data.get("data", {}).get("sheets", [])
+                return sheets[0].get("sheetId") if sheets else None
+            logger.warning(f"Failed to get metainfo for {spreadsheet_token}: {data}")
+            return None
+        except Exception as e:
+            logger.error(f"Error getting sheet_id: {e}")
+            return None
+
     def create_todo_spreadsheet(self, chat_id: str, todos: list,
                                 user_id: str = None) -> Optional[Tuple[str, str, str]]:
         """
