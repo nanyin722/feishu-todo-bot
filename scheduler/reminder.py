@@ -63,6 +63,20 @@ class ReminderService:
             logger.warning(f"Failed to read spreadsheet status for chat {chat_id}: {e}")
             return set()
 
+    def _sync_completions_from_spreadsheet(self, chat_id: str):
+        """将表格中手动标记为'已完成'的任务同步回数据库"""
+        try:
+            completed_in_sheet = self._get_completed_from_spreadsheet(chat_id)
+            if not completed_in_sheet:
+                return
+            for task_id in completed_in_sheet:
+                todo = self.database.get_todo_by_id(task_id)
+                if todo and not todo.completed:
+                    self.database.complete_todo(task_id)
+                    logger.info(f"Synced completion from spreadsheet: todo {task_id} in chat {chat_id}")
+        except Exception as e:
+            logger.warning(f"Failed to sync completions from spreadsheet for chat {chat_id}: {e}")
+
     def send_weekly_reminder(self):
         """
         发送每周统一提醒。
@@ -97,13 +111,11 @@ class ReminderService:
     def _send_weekly_reminder_for_chat(self, chat_id: str):
         """为单个群组发送每周提醒"""
         try:
+            # 先将表格中已完成的任务同步回数据库
+            self._sync_completions_from_spreadsheet(chat_id)
+
             # 获取未完成的待办
             todos = self.database.get_todos_by_chat(chat_id, include_completed=False)
-
-            # 排除表格中已手动标记为已完成的任务
-            completed_in_sheet = self._get_completed_from_spreadsheet(chat_id)
-            if completed_in_sheet:
-                todos = [t for t in todos if t.id not in completed_in_sheet]
 
             if not todos:
                 logger.info(f"No todos for chat {chat_id}, skipping reminder")
@@ -225,10 +237,9 @@ class ReminderService:
 
             # 为每个群组发送提醒
             for chat_id, chat_todos in todos_by_chat.items():
-                # 排除表格中已手动标记为已完成的任务
-                completed_in_sheet = self._get_completed_from_spreadsheet(chat_id)
-                if completed_in_sheet:
-                    chat_todos = [t for t in chat_todos if t.id not in completed_in_sheet]
+                # 先将表格中已完成的任务同步回数据库，再重新过滤
+                self._sync_completions_from_spreadsheet(chat_id)
+                chat_todos = [t for t in chat_todos if not self.database.get_todo_by_id(t.id).completed]
                 if chat_todos:
                     self._send_deadline_reminder_for_chat(chat_id, chat_todos)
 
@@ -298,10 +309,9 @@ class ReminderService:
                 if not overdue:
                     continue
 
-                # 排除表格中已手动标记为已完成的任务
-                completed_in_sheet = self._get_completed_from_spreadsheet(chat_id)
-                if completed_in_sheet:
-                    overdue = [t for t in overdue if t.id not in completed_in_sheet]
+                # 将表格中已完成的任务同步回数据库，再重新过滤
+                self._sync_completions_from_spreadsheet(chat_id)
+                overdue = [t for t in overdue if not self.database.get_todo_by_id(t.id).completed]
 
                 if not overdue:
                     continue
