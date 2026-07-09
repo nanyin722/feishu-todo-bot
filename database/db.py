@@ -307,6 +307,28 @@ class Database:
             logger.info(f"Saved spreadsheet info for chat {chat_id}: {token}")
             return True
 
+    def get_name_to_open_id_map(self, chat_id: str) -> dict:
+        """返回群组内所有已知的 姓名->open_id 映射（从待办记录中收集）"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT user_name, user_id, assignee_name, assignee_id FROM todos WHERE chat_id = ?",
+                (chat_id,)
+            )
+            rows = cursor.fetchall()
+            name_map = {}
+            for row in rows:
+                if row['user_name'] and row['user_id']:
+                    name_map[row['user_name']] = row['user_id']
+                if row['assignee_name'] and row['assignee_id']:
+                    names = str(row['assignee_name']).split(',')
+                    ids = str(row['assignee_id']).split(',')
+                    for n, i in zip(names, ids):
+                        n, i = n.strip(), i.strip()
+                        if n and i:
+                            name_map[n] = i
+            return name_map
+
     def get_all_enabled_chats(self) -> List[str]:
         """获取所有启用提醒的群组"""
         with self.get_connection() as conn:

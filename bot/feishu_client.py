@@ -218,6 +218,54 @@ class FeishuClient:
             logger.error(f"Error getting user info: {e}")
             return None
 
+    def read_spreadsheet_todos(self, spreadsheet_token: str, sheet_id: str) -> Optional[list]:
+        """读取表格中所有任务行，返回 dict 列表。
+        列顺序：A=任务ID, B=内容, C=负责人, D=创建时间, E=截止时间, F=状态
+        返回字段：task_id, content, assignee_name, deadline, status
+        """
+        try:
+            import requests
+            token = self._get_tenant_access_token()
+            if not token:
+                return None
+            headers = {"Authorization": f"Bearer {token}"}
+            read_range = f"{sheet_id}!A2:F2000"
+            resp = requests.get(
+                f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets"
+                f"/{spreadsheet_token}/values/{read_range}",
+                headers=headers
+            )
+            data = resp.json()
+            if data.get("code") != 0:
+                logger.warning(f"Failed to read spreadsheet {spreadsheet_token}: {data}")
+                return None
+            rows = data.get("data", {}).get("valueRange", {}).get("values", []) or []
+            result = []
+            for row in rows:
+                if not row or not row[0]:
+                    continue
+                try:
+                    task_id = int(str(row[0]))
+                except (ValueError, TypeError):
+                    continue
+                content = str(row[1]) if len(row) > 1 and row[1] else ""
+                assignee_name = str(row[2]) if len(row) > 2 and row[2] else ""
+                deadline = str(row[4]) if len(row) > 4 and row[4] else ""
+                status = str(row[5]) if len(row) > 5 and row[5] else "进行中"
+                if deadline in ('未设置', ''):
+                    deadline = ''
+                result.append({
+                    'task_id': task_id,
+                    'content': content,
+                    'assignee_name': assignee_name,
+                    'deadline': deadline,
+                    'status': status,
+                })
+            return result
+        except Exception as e:
+            logger.warning(f"Failed to read spreadsheet todos: {e}")
+            return None
+
     def get_first_sheet_id(self, spreadsheet_token: str) -> Optional[str]:
         """从已有表格 token 获取第一个工作表的 sheet_id"""
         try:

@@ -77,6 +77,63 @@ class ReminderService:
         except Exception as e:
             logger.warning(f"Failed to sync completions from spreadsheet for chat {chat_id}: {e}")
 
+    def _get_todos_for_reminder(self, chat_id: str) -> List[Todo]:
+        """获取用于提醒的任务列表，若群组有关联表格则优先从表格读取最新状态"""
+        try:
+            config = self.database.get_reminder_config(chat_id)
+            if config.spreadsheet_token and config.spreadsheet_sheet_id:
+                todos = self._read_active_todos_from_spreadsheet(chat_id, config)
+                if todos is not None:
+                    return todos
+        except Exception as e:
+            logger.warning(f"Fallback to DB for {chat_id}: {e}")
+        return self.database.get_todos_by_chat(chat_id, include_completed=False)
+
+    def _read_active_todos_from_spreadsheet(self, chat_id: str, config) -> Optional[List[Todo]]:
+        """从表格读取活跃任务（状态不为'已完成'），以表格数据覆盖DB数据后返回 Todo 列表"""
+        rows = self.feishu_client.read_spreadsheet_todos(
+            config.spreadsheet_token, config.spreadsheet_sheet_id
+        )
+        if rows is None:
+            return None
+
+        # 构建姓名→open_id映射，处理表格中手动修改负责人的情况
+        name_to_id = self.database.get_name_to_open_id_map(chat_id)
+
+        result = []
+        for row in rows:
+            if '已完成' in row.get('status', ''):
+                continue
+            task_id = row['task_id']
+            db_todo = self.database.get_todo_by_id(task_id)
+            if not db_todo:
+                continue  # 表格里有但DB没有，跳过
+
+            assignee_name = row.get('assignee_name') or db_todo.assignee_name
+            assignee_id = db_todo.assignee_id
+            # 表格里负责人名字变了，尝试从名字映射中找到新的open_id
+            if assignee_name and assignee_name != db_todo.assignee_name:
+                new_id = name_to_id.get(assignee_name)
+                if new_id:
+                    assignee_id = new_id
+
+            deadline = row.get('deadline') or db_todo.deadline
+
+            result.append(Todo(
+                id=task_id,
+                chat_id=db_todo.chat_id,
+                user_id=db_todo.user_id,
+                user_name=db_todo.user_name,
+                content=row.get('content') or db_todo.content,
+                deadline=deadline,
+                created_at=db_todo.created_at,
+                reminded_daily=db_todo.reminded_daily,
+                completed=False,
+                assignee_id=assignee_id,
+                assignee_name=assignee_name,
+            ))
+        return result
+
     def send_weekly_reminder(self):
         """
         发送每周统一提醒。
@@ -111,11 +168,8 @@ class ReminderService:
     def _send_weekly_reminder_for_chat(self, chat_id: str):
         """为单个群组发送每周提醒"""
         try:
-            # 先将表格中已完成的任务同步回数据库
-            self._sync_completions_from_spreadsheet(chat_id)
-
-            # 获取未完成的待办
-            todos = self.database.get_todos_by_chat(chat_id, include_completed=False)
+            # 优先从表格读取最新任务状态（截止时间、负责人、是否完成）
+            todos = self._get_todos_for_reminder(chat_id)
 
             if not todos:
                 logger.info(f"No todos for chat {chat_id}, skipping reminder")
@@ -220,30 +274,25 @@ class ReminderService:
             logger.info("Starting daily deadline reminder task")
 
             today = date.today()
+            today_str = today.strftime('%Y-%m-%d')
 
-            # 获取今天到期且未提醒的待办
-            todos = self.database.get_todos_by_deadline(today, reminded=False)
+            chat_ids = self.database.get_all_active_chats()
 
-            if not todos:
-                logger.info("No todos due today, skipping deadline reminder")
+            if not chat_ids:
+                logger.info("No active chats, skipping deadline reminder")
                 return
 
-            # 按群组分组
-            todos_by_chat = {}
-            for todo in todos:
-                if todo.chat_id not in todos_by_chat:
-                    todos_by_chat[todo.chat_id] = []
-                todos_by_chat[todo.chat_id].append(todo)
+            for chat_id in chat_ids:
+                # 优先从表格读取最新截止时间和状态
+                todos = self._get_todos_for_reminder(chat_id)
+                due_today = [
+                    t for t in todos
+                    if t.deadline and t.deadline[:10] == today_str and not t.reminded_daily
+                ]
+                if due_today:
+                    self._send_deadline_reminder_for_chat(chat_id, due_today)
 
-            # 为每个群组发送提醒
-            for chat_id, chat_todos in todos_by_chat.items():
-                # 先将表格中已完成的任务同步回数据库，再重新过滤
-                self._sync_completions_from_spreadsheet(chat_id)
-                chat_todos = [t for t in chat_todos if not self.database.get_todo_by_id(t.id).completed]
-                if chat_todos:
-                    self._send_deadline_reminder_for_chat(chat_id, chat_todos)
-
-            logger.info(f"Daily deadline reminder completed for {len(todos_by_chat)} chats")
+            logger.info(f"Daily deadline reminder completed for {len(chat_ids)} chats")
 
         except Exception as e:
             logger.error(f"Error in daily deadline reminder task: {e}", exc_info=True)
@@ -299,19 +348,13 @@ class ReminderService:
             chat_ids = self.database.get_all_active_chats()
 
             for chat_id in chat_ids:
-                todos = self.database.get_todos_by_chat(chat_id, include_completed=False)
+                # 优先从表格读取最新截止时间和状态
+                todos = self._get_todos_for_reminder(chat_id)
                 overdue = [
                     t for t in todos
                     if t.deadline and
                     datetime.strptime(t.deadline[:10], '%Y-%m-%d').date() < today
                 ]
-
-                if not overdue:
-                    continue
-
-                # 将表格中已完成的任务同步回数据库，再重新过滤
-                self._sync_completions_from_spreadsheet(chat_id)
-                overdue = [t for t in overdue if not self.database.get_todo_by_id(t.id).completed]
 
                 if not overdue:
                     continue
