@@ -422,7 +422,7 @@ class FeishuClient:
                 str(todo_id),
                 todo.content or "",
                 todo.assignee_name or todo.user_name or "",
-                todo.created_at or "",
+                todo.created_at and self._to_cst(todo.created_at) or "",
                 todo.deadline or "未设置",
                 status,
                 ""
@@ -610,7 +610,7 @@ class FeishuClient:
                     str(todo.id),
                     todo.content or "",
                     todo.assignee_name or todo.user_name or "",
-                    todo.created_at or "",
+                    self._to_cst(todo.created_at or ""),
                     todo.deadline or "未设置",
                     status,
                     note
@@ -647,6 +647,18 @@ class FeishuClient:
         except Exception as e:
             logger.error(f"Error writing spreadsheet data: {e}", exc_info=True)
             return False
+
+    @staticmethod
+    def _to_cst(utc_str: str) -> str:
+        """将 UTC 时间字符串转为北京时间（UTC+8）显示"""
+        if not utc_str:
+            return utc_str
+        try:
+            from datetime import datetime, timedelta
+            dt = datetime.strptime(str(utc_str)[:19], '%Y-%m-%d %H:%M:%S')
+            return (dt + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+            return utc_str
 
     def _get_tenant_access_token(self) -> Optional[str]:
         """获取租户访问令牌"""
